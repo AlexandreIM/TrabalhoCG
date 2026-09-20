@@ -11,16 +11,21 @@
 
 ## Integrantes da dupla
 
-- **Aluno 1 - Nome**: <mark>`<preencher>`</mark>
-- **Aluno 1 - Cartão UFRGS**: <mark>`<preencher>`</mark>
+- **Aluno 1 - Nome**: <mark>`Alexandre Ikeda Mucenic`</mark>
+- **Aluno 1 - Cartão UFRGS**: <mark>`587903`</mark>
 
-- **Aluno 2 - Nome**: <mark>`<preencher>`</mark>
-- **Aluno 2 - Cartão UFRGS**: <mark>`<preencher>`</mark>
+- **Aluno 2 - Nome**: <mark>`Rafael Borges Stephanou`</mark>
+- **Aluno 2 - Cartão UFRGS**: <mark>`590367`</mark>
 
 ## Detalhes do que será implementado
 
 - **Título do trabalho**: <mark>`<preencher>`</mark>
-- **Parágrafo curto descrevendo o que será implementado**: <mark>`<preencher>`</mark>
+- **Parágrafo curto descrevendo o que será implementado**: <mark>
+`Jogo 3D de corrida baseado no momentum de um pássaro, inspirado em Haste e Tiny Wings. O
+personagem desliza automaticamente sobre um terreno com inclinações que o
+lançam ao ar, dependendo da inclinação delas. O jogador controla a direção e um "dive" para pousar alinhado
+com as rampas e manter velocidade, coletando itens ao longo da pista sem
+cair do mapa.`</mark>
 
 ## Especificação visual
 
@@ -86,31 +91,32 @@
 Para cada um dos requisitos abaixo (detalhados no [Enunciado do Trabalho final - Moodle](https://moodle.ufrgs.br/mod/assign/view.php?id=6302370)), escreva um parágrafo **curto** explicando como este requisito será atendido, apontando itens específicos do vídeo/imagens que você incluiu acima que atendem estes requisitos.
 
 ### Malhas poligonais complexas
-<mark>`<preencher>`</mark>
+<mark>`Personagem (modelo OBJ importado) e terreno (grid de vértices com alturas variáveis, formando as ondulações da pista), ambos malhas de triângulos.`</mark>
 
 ### Transformações geométricas controladas pelo usuário
-<mark>`<preencher>`</mark>
+<mark>`O personagem corre para frente automaticamente; o jogador controla sua direção (rotação horizontal aplicada à Model matrix do personagem) e pode acionar o dive, que inclina o modelo para baixo. Ambas são transformações geométricas do personagem, controladas pelo mouse.`</mark>
 
 ### Diferentes tipos de câmeras
-<mark>`<preencher>`</mark>
+<mark>`Câmera em terceira pessoa que segue o personagem por trás, orientação vertical fixa e orientação horizontal controlada pelo mouse (principal), e câmera livre com eixos totalmente controláveis pelo jogador (secundária).`</mark>
 
 ### Instâncias de objetos
-<mark>`<preencher>`</mark>
+<mark>`Coletáveis desenhados com Model matrices ao longo do terreno.`</mark>
 
 ### Testes de intersecção
-<mark>`<preencher>`</mark>
+<mark>`Personagem com o terreno para detectar quedas; Personagem com coletáveis para marcar pontos`</mark>
 
 ### Modelos de Iluminação em todos os objetos
-<mark>`<preencher>`</mark>
+<mark>`Iluminação phong por pixel com luz direcional simulando um sol, aplicada ao personagem, terreno e coletáveis.`</mark>
 
 ### Mapeamento de texturas em todos os objetos
-<mark>`<preencher>`</mark>
+<mark>`Texturas de imagem em todos os objetos
+(terreno, personagem, coletáveis), sem esticamento não-natural.` </mark>
 
 ### Movimentação com curva Bézier cúbica
-<mark>`<preencher>`</mark>
+<mark>`Um coletável especial se movimenta ao longo de uma curva de Bézier cúbica, flutuando em caminho curvo.`</mark>
 
 ### Animações baseadas no tempo ($\Delta t$)
-<mark>`<preencher>`</mark>
+<mark>`Movimento pra frente do personagem, rotação do personagem, dive, que inclina o personagem pra baixo vão ser computadas considerando o tempo entre os frames, mantendo a velocidade constante independentemente do hardware.`</mark>
 
 ### Funcionalidade extra obrigatória
 
