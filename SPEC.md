@@ -19,13 +19,14 @@
 
 ## Detalhes do que será implementado
 
-- **Título do trabalho**: <mark>`<preencher>`</mark>
+- **Título do trabalho**: <mark>`Hasty Wings`</mark>
 - **Parágrafo curto descrevendo o que será implementado**: <mark>
 `Jogo 3D de corrida baseado no momentum de um pássaro, inspirado em Haste e Tiny Wings. O
 personagem desliza automaticamente sobre um terreno com inclinações que o
 lançam ao ar, dependendo da inclinação delas. O jogador controla a direção e um "dive" para pousar alinhado
 com as rampas e manter velocidade, coletando itens ao longo da pista sem
-cair do mapa.`</mark>
+cair do mapa. O jogador deve manter uma certa velocidade (ou viajar uma certa distância por períodos de tempo) para evitar que
+o sol se ponha no horizonte, senão o jogo acaba.`</mark>
 
 ## Especificação visual
 
@@ -44,7 +45,7 @@ cair do mapa.`</mark>
 >   do próprio repositório. Mas, garanta que qualquer um tenha
 >   permissão de acesso ao vídeo através deste link.
 
-<mark>`<preencher>`</mark>
+<mark>`https://www.youtube.com/watch?v=dHoXrWIawxY`</mark>
 
 ### Vídeo - Timestamp
 
@@ -53,8 +54,8 @@ cair do mapa.`</mark>
 >   será a base de comparação para avaliar se o seu trabalho final
 >   conseguiu ou não reproduzir a referência.
 
-- **Timestamp inicial**: <mark>`<preencher>`</mark>
-- **Timestamp final**: <mark>`<preencher>`</mark>
+- **Timestamp inicial**: <mark>`0:12`</mark>
+- **Timestamp final**: <mark>`0:20`</mark>
 
 ### Imagens
 
@@ -70,19 +71,19 @@ cair do mapa.`</mark>
 
 #### Imagem 1
 
-- **Descrição**: <mark>`<preencher>`</mark>
+- **Descrição**: <mark>`Personagem "mergulhando" na descida do terreno para ganhar velocidade`</mark>
 
 ![Imagem 1](images/spec/image1.jpg)
 
 #### Imagem 2
 
-- **Descrição**: <mark>`<preencher>`</mark>
+- **Descrição**: <mark>`Personagem coletando objetos coletáveis ao colidir com eles`</mark>
 
 ![Imagem 2](images/spec/image2.jpg)
 
 #### Imagem 3
 
-- **Descrição**: <mark>`<preencher>`</mark>
+- **Descrição**: <mark>`Personagem "voando" após saltar com alta velocidade usando a subida no terreno`</mark>
 
 ![Imagem 3](images/spec/image3.jpg)
 
@@ -126,7 +127,7 @@ Para cada um dos requisitos abaixo (detalhados no [Enunciado do Trabalho final -
 > - Esta funcionalidade também deverá ser documentada no arquivo
 >   `README.md` da entrega final.
 
-<mark>`<preencher>`</mark>
+<mark>`Sombra dos objetos causada pela iluminação do "sol"(direção da luz)`</mark>
 
 ## Limitações esperadas
 
@@ -137,4 +138,4 @@ Para cada um dos requisitos abaixo (detalhados no [Enunciado do Trabalho final -
 > - Para cada item, **explique por que** não será implementado ou por
 >   que será implementado parcialmente.
 
-<mark>`<preencher>`</mark>
+<mark>`Só serão implementadas as funcionalidades de movimento do personagem do jogo 'Haste', excluindo as características "roguelike" do jogo. Os gráficos também serão bastante simplificados e os objetos não necessariamente serão similares aos jogos originais. O objetivo do jogo será muito mais parecido com o jogo 'Tiny Wings', mas no formato 3D, já que o jogo original é 2D.`</mark>
