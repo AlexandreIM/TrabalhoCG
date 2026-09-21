@@ -73,19 +73,19 @@ o sol se ponha no horizonte, senão o jogo acaba.`</mark>
 
 - **Descrição**: <mark>`Personagem "mergulhando" na descida do terreno para ganhar velocidade`</mark>
 
-![Imagem 1](images/spec/image1.jpg)
+![Imagem 1](images/spec/image1.png)
 
 #### Imagem 2
 
 - **Descrição**: <mark>`Personagem coletando objetos coletáveis ao colidir com eles`</mark>
 
-![Imagem 2](images/spec/image2.jpg)
+![Imagem 2](images/spec/image2.png)
 
 #### Imagem 3
 
 - **Descrição**: <mark>`Personagem "voando" após saltar com alta velocidade usando a subida no terreno`</mark>
 
-![Imagem 3](images/spec/image3.jpg)
+![Imagem 3](images/spec/image3.png)
 
 ## Especificação textual
 
