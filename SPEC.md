@@ -109,6 +109,8 @@ Para cada um dos requisitos abaixo (detalhados no [Enunciado do Trabalho final -
 ### Modelos de Iluminação em todos os objetos
 <mark>`Iluminação phong por pixel com luz direcional simulando um sol, aplicada ao personagem, terreno e coletáveis.`</mark>
 
+> Comentário Professor: Reproduzam o visual cartoon do jogo. Considerem que o modelo de iluminação de Phong pode não ser suficiente.
+
 ### Mapeamento de texturas em todos os objetos
 <mark>`Texturas de imagem em todos os objetos
 (terreno, personagem, coletáveis), sem esticamento não-natural.` </mark>
@@ -139,3 +141,9 @@ Para cada um dos requisitos abaixo (detalhados no [Enunciado do Trabalho final -
 >   que será implementado parcialmente.
 
 <mark>`Só serão implementadas as funcionalidades de movimento do personagem do jogo 'Haste', excluindo as características "roguelike" do jogo. Os gráficos também serão bastante simplificados e os objetos não necessariamente serão similares aos jogos originais. O objetivo do jogo será muito mais parecido com o jogo 'Tiny Wings', mas no formato 3D, já que o jogo original é 2D.`</mark>
+
+> Comentário Professor: Detalhem item a item o que vocês querem dizer com “os gráficos também serão bastante simplificados”. Como o vídeo e as imagens são as referências visuais, mantenham no resultado final um visual semelhante, no estilo cartoon.
+
+> Comentário Professor: O personagem apresenta vários efeitos de animação esquelética no vídeo. Esclareçam se vocês implementarão esses efeitos.
+
+> Comentário Professor: O vídeo mostra efeitos de partículas no contato com o solo. Implementem esses efeitos.
