@@ -26,7 +26,7 @@ personagem desliza automaticamente sobre um terreno com inclinações que o
 lançam ao ar, dependendo da inclinação delas. O jogador controla a direção e um "dive" para pousar alinhado
 com as rampas e manter velocidade, coletando itens ao longo da pista sem
 cair do mapa. O jogador deve manter uma certa velocidade (ou viajar uma certa distância por períodos de tempo) para evitar que
-o sol se ponha no horizonte, senão o jogo acaba.`</mark>
+o sol se ponha no horizonte, senão o jogo acaba. O jogador deve coletar o maior número de itens para acumular pontos.`</mark>
 
 ## Especificação visual
 
@@ -92,7 +92,7 @@ o sol se ponha no horizonte, senão o jogo acaba.`</mark>
 Para cada um dos requisitos abaixo (detalhados no [Enunciado do Trabalho final - Moodle](https://moodle.ufrgs.br/mod/assign/view.php?id=6302370)), escreva um parágrafo **curto** explicando como este requisito será atendido, apontando itens específicos do vídeo/imagens que você incluiu acima que atendem estes requisitos.
 
 ### Malhas poligonais complexas
-<mark>`Personagem (modelo OBJ importado) e terreno (grid de vértices com alturas variáveis, formando as ondulações da pista), ambos malhas de triângulos.`</mark>
+<mark>`Personagem (modelo OBJ do angry bird vermelho importado) e terreno (grid de vértices com alturas variáveis, formando as ondulações da pista), ambos malhas de triângulos.`</mark>
 
 ### Transformações geométricas controladas pelo usuário
 <mark>`O personagem corre para frente automaticamente; o jogador controla sua direção (rotação horizontal aplicada à Model matrix do personagem) e pode acionar o dive, que inclina o modelo para baixo. Ambas são transformações geométricas do personagem, controladas pelo mouse.`</mark>
@@ -104,10 +104,10 @@ Para cada um dos requisitos abaixo (detalhados no [Enunciado do Trabalho final -
 <mark>`Coletáveis desenhados com Model matrices ao longo do terreno.`</mark>
 
 ### Testes de intersecção
-<mark>`Personagem com o terreno para detectar quedas; Personagem com coletáveis para marcar pontos`</mark>
+<mark>`Personagem com o terreno para detectar quedas que deve levantar partículas; Personagem com coletáveis para marcar pontos`</mark>
 
 ### Modelos de Iluminação em todos os objetos
-<mark>`Iluminação phong por pixel com luz direcional simulando um sol, aplicada ao personagem, terreno e coletáveis.`</mark>
+<mark>`Modelo de Lambert com quantização para replicar Toon Shading junto de luz direcional de intensidade e cor variável e shadow mapping com PCF (para suavizar a sombra)`</mark>
 
 ### Mapeamento de texturas em todos os objetos
 <mark>`Texturas de imagem em todos os objetos
@@ -138,4 +138,9 @@ Para cada um dos requisitos abaixo (detalhados no [Enunciado do Trabalho final -
 > - Para cada item, **explique por que** não será implementado ou por
 >   que será implementado parcialmente.
 
-<mark>`Só serão implementadas as funcionalidades de movimento do personagem do jogo 'Haste', excluindo as características "roguelike" do jogo. Os gráficos também serão bastante simplificados e os objetos não necessariamente serão similares aos jogos originais. O objetivo do jogo será muito mais parecido com o jogo 'Tiny Wings', mas no formato 3D, já que o jogo original é 2D.`</mark>
+<mark> Tentaremos replicar o processo de movimentação e visual cartoon de Haste, com as seguintes simplificações:
+- Não inseriremos obstáculos como árvores sobre o mapa
+- Efeitos visuais como nuvens e variações na textura do terreno não serão replicados. No entanto, vamos manter o efeito de partículas que surgem no atrito do 'dive' com o solo e diferenças na claridade do solo de acordo com a angulação com o sol.
+- Nosso personagem vai ser um passáro redondo sem animações esqueléticas.
+- Não vamos incluir os indicadores de qualidade de timing como 'Perfect' e 'Great', nem indicador de velocidade em kph do personagem.
+- Não haverá sistemas de níveis, vidas, bosses ou elementos roguelike. O objetivo do jogo será muito mais parecido com o jogo 'Tiny Wings', mas no formato 3D, já que o jogo original é 2D`</mark>
