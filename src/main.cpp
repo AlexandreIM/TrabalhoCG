@@ -137,12 +137,27 @@ void TextRendering_PrintMatrixVectorProduct(GLFWwindow* window, glm::mat4 M, glm
 void TextRendering_PrintMatrixVectorProductMoreDigits(GLFWwindow* window, glm::mat4 M, glm::vec4 v, float x, float y, float scale = 1.0f);
 void TextRendering_PrintMatrixVectorProductDivW(GLFWwindow* window, glm::mat4 M, glm::vec4 v, float x, float y, float scale = 1.0f);
 
+// Declaração de funções do terreno infinito, definidas em "terrain.cpp".
+void  Terrain_Init();
+void  Terrain_Update(float player_x);
+void  Terrain_Draw();
+float TerrainHeight(float x, float z);
+float TerrainSlope(float x, float z);
+
+void  UpdatePlayer(float delta_t); // Atualiza velocidade e posição do jogador
+void  UpdatePlayerOnGround(float delta_t, bool diving);
+void  UpdatePlayerInAir(float delta_t, bool diving);
+float PlayerAirGravity(bool diving);
+void  PlacePlayerOnGround();
+float PlayerDistanceToTerrain(float cx, float cy, float* contact_x);
+
 // Funções abaixo renderizam como texto na janela OpenGL algumas matrizes e
 // outras informações do programa. Definidas após main().
 void TextRendering_ShowModelViewProjection(GLFWwindow* window, glm::mat4 projection, glm::mat4 view, glm::mat4 model, glm::vec4 p_model);
 void TextRendering_ShowEulerAngles(GLFWwindow* window);
 void TextRendering_ShowProjection(GLFWwindow* window);
 void TextRendering_ShowFramesPerSecond(GLFWwindow* window);
+void TextRendering_ShowPlayerSpeed(GLFWwindow* window);
 
 // Funções callback para comunicação com o sistema operacional e interação do
 // usuário. Veja mais comentários nas definições das mesmas, abaixo.
@@ -196,8 +211,8 @@ bool g_MiddleMouseButtonPressed = false; // Análogo para botão do meio do mous
 // efetiva da câmera é calculada dentro da função main(), dentro do loop de
 // renderização.
 float g_CameraTheta = 0.0f; // Ângulo no plano ZX em relação ao eixo Z
-float g_CameraPhi = 0.0f;   // Ângulo em relação ao eixo Y
-float g_CameraDistance = 3.5f; // Distância da câmera para a origem
+float g_CameraPhi = 0.3f;   // Ângulo em relação ao eixo Y
+float g_CameraDistance = 16.0f; // Distância da câmera para o jogador. Maior que metade da largura do terreno, para que a câmera fique fora dele (vista lateral).
 
 // Variáveis que controlam rotação do antebraço
 float g_ForearmAngleZ = 0.0f;
@@ -206,6 +221,29 @@ float g_ForearmAngleX = 0.0f;
 // Variáveis que controlam translação do torso
 float g_TorsoPositionX = 0.0f;
 float g_TorsoPositionY = 0.0f;
+
+// Estado do jogador, que desliza sobre o terreno ou voa. Veja UpdatePlayer().
+#define PLAYER_RADIUS 0.5f  // Raio da esfera que representa o jogador
+
+float g_PlayerX = 0.0f;        // Posição do centro da esfera do jogador. Inicializada em main().
+float g_PlayerY = 0.0f;
+float g_PlayerContactX = 0.0f; // No chão: coordenada x do ponto de contato com o terreno
+float g_PlayerSpeed = 5.0f; // No chão: velocidade ao longo da superfície do terreno, em unidades por segundo
+float g_PlayerVX = 0.0f;    // No ar: componentes da velocidade
+float g_PlayerVY = 0.0f;
+bool  g_PlayerOnGround = true;
+
+#define PLAYER_BASE_SPEED  5.0f  // Velocidade sem "dive"
+#define PLAYER_MIN_SPEED   1.0f  // Velocidade mínima durante o "dive": o jogador nunca para nem anda para trás
+#define PLAYER_GRAVITY     9.8f  // Aceleração da gravidade
+#define PLAYER_DRAG        0.15f // Durante o "dive": taxa com que a diferença para a velocidade base se dissipa, por segundo
+#define PLAYER_RETURN_RATE 1.0f  // Sem "dive": taxa com que a velocidade volta para a base, por segundo. Lenta o bastante para o embalo de uma descida chegar ao topo do morro seguinte.
+
+#define PLAYER_GLIDE_GRAVITY_MULT 0.35f // No ar, sem "dive": fração da gravidade (planar)
+#define PLAYER_DIVE_GRAVITY_MULT  2.5f  // No ar, com "dive": multiplicador da gravidade (mergulho)
+#define PLAYER_GLIDE_MAX_FALL     4.0f  // No ar, sem "dive": velocidade máxima de queda
+
+#define PLAYER_TAKEOFF_MIN_EXCESS 0.5f  // Excesso mínimo de velocidade, acima da base, para decolar
 
 // Variável que controla o tipo de projeção utilizada: perspectiva ou ortográfica.
 bool g_UsePerspectiveProjection = true;
@@ -321,6 +359,14 @@ int main(int argc, char* argv[])
         BuildTrianglesAndAddToVirtualScene(&model);
     }
 
+    // Criamos os chunks do terreno infinito. Veja "terrain.cpp".
+    Terrain_Init();
+
+    // O jogador começa apoiado sobre o terreno.
+    PlacePlayerOnGround();
+
+    float previous_time = (float)glfwGetTime();
+
     // Inicializamos o código para renderização de texto.
     TextRendering_Init();
 
@@ -353,6 +399,19 @@ int main(int argc, char* argv[])
         // os shaders de vértice e fragmentos).
         glUseProgram(g_GpuProgramID);
 
+        // Avançamos o jogador de acordo com o tempo decorrido desde o quadro
+        // anterior, de forma que a velocidade não dependa da taxa de quadros.
+        float current_time = (float)glfwGetTime();
+        float delta_t = current_time - previous_time;
+        previous_time = current_time;
+        UpdatePlayer(delta_t);
+
+        // Atualizamos os chunks do terreno ao redor da posição do jogador.
+        Terrain_Update(g_PlayerX);
+
+        // O jogador (por enquanto, a esfera) fica apoiado sobre o terreno.
+        glm::vec4 player_position = glm::vec4(g_PlayerX, g_PlayerY, 0.0f, 1.0f);
+
         // Computamos a posição da câmera utilizando coordenadas esféricas.  As
         // variáveis g_CameraDistance, g_CameraPhi, e g_CameraTheta são
         // controladas pelo mouse do usuário. Veja as funções CursorPosCallback()
@@ -364,8 +423,9 @@ int main(int argc, char* argv[])
 
         // Abaixo definimos as varáveis que efetivamente definem a câmera virtual.
         // Veja slides 195-227 e 229-234 do documento Aula_08_Sistemas_de_Coordenadas.pdf.
-        glm::vec4 camera_position_c  = glm::vec4(x,y,z,1.0f); // Ponto "c", centro da câmera
-        glm::vec4 camera_lookat_l    = glm::vec4(0.0f,0.0f,0.0f,1.0f); // Ponto "l", para onde a câmera (look-at) estará sempre olhando
+        // A câmera orbita ao redor do jogador, em vez de ao redor da origem.
+        glm::vec4 camera_lookat_l    = player_position; // Ponto "l", para onde a câmera (look-at) estará sempre olhando
+        glm::vec4 camera_position_c  = camera_lookat_l + glm::vec4(x,y,z,0.0f); // Ponto "c", centro da câmera
         glm::vec4 camera_view_vector = camera_lookat_l - camera_position_c; // Vetor "view", sentido para onde a câmera está virada
         glm::vec4 camera_up_vector   = glm::vec4(0.0f,1.0f,0.0f,0.0f); // Vetor "up" fixado para apontar para o "céu" (eito Y global)
 
@@ -379,7 +439,7 @@ int main(int argc, char* argv[])
         // Note que, no sistema de coordenadas da câmera, os planos near e far
         // estão no sentido negativo! Veja slides 176-204 do documento Aula_09_Projecoes.pdf.
         float nearplane = -0.1f;  // Posição do "near plane"
-        float farplane  = -10.0f; // Posição do "far plane"
+        float farplane  = -150.0f; // Posição do "far plane". Deve ficar além do alcance da neblina (veja "shader_fragment.glsl").
 
         if (g_UsePerspectiveProjection)
         {
@@ -410,31 +470,33 @@ int main(int argc, char* argv[])
         glUniformMatrix4fv(g_view_uniform       , 1 , GL_FALSE , glm::value_ptr(view));
         glUniformMatrix4fv(g_projection_uniform , 1 , GL_FALSE , glm::value_ptr(projection));
 
-        #define SPHERE 0
-        #define BUNNY  1
-        #define PLANE  2
+        #define SPHERE  0
+        #define BUNNY   1
+        #define PLANE   2
+        #define TERRAIN 3
 
-        // Desenhamos o modelo da esfera
-        model = Matrix_Translate(-1.0f,0.0f,0.0f)
-              * Matrix_Rotate_Z(0.6f)
-              * Matrix_Rotate_X(0.2f)
-              * Matrix_Rotate_Y(g_AngleY + (float)glfwGetTime() * 0.1f);
+        // Desenhamos o modelo da esfera, que por enquanto representa o
+        // jogador, rolando sobre o terreno.
+        model = Matrix_Translate(player_position.x, player_position.y, player_position.z)
+              * Matrix_Scale(PLAYER_RADIUS, PLAYER_RADIUS, PLAYER_RADIUS)
+              * Matrix_Rotate_Z(-g_PlayerX / PLAYER_RADIUS);
         glUniformMatrix4fv(g_model_uniform, 1 , GL_FALSE , glm::value_ptr(model));
         glUniform1i(g_object_id_uniform, SPHERE);
         DrawVirtualObject("the_sphere");
 
-        // Desenhamos o modelo do coelho
-        model = Matrix_Translate(1.0f,0.0f,0.0f)
-              * Matrix_Rotate_X(g_AngleX + (float)glfwGetTime() * 0.1f);
+        // Desenhamos o modelo do coelho, parado sobre o terreno no início da pista
+        model = Matrix_Translate(1.0f, TerrainHeight(1.0f, -3.0f) + 1.0f, -3.0f)
+              * Matrix_Rotate_Y(g_AngleY + (float)glfwGetTime() * 0.1f);
         glUniformMatrix4fv(g_model_uniform, 1 , GL_FALSE , glm::value_ptr(model));
         glUniform1i(g_object_id_uniform, BUNNY);
         DrawVirtualObject("the_bunny");
 
-        // Desenhamos o plano do chão
-        model = Matrix_Translate(0.0f,-1.1f,0.0f);
+        // Desenhamos o terreno. Seus vértices já estão em coordenadas
+        // globais, então a matriz de modelagem é a identidade.
+        model = Matrix_Identity();
         glUniformMatrix4fv(g_model_uniform, 1 , GL_FALSE , glm::value_ptr(model));
-        glUniform1i(g_object_id_uniform, PLANE);
-        DrawVirtualObject("the_plane");
+        glUniform1i(g_object_id_uniform, TERRAIN);
+        Terrain_Draw();
 
         // Imprimimos na tela os ângulos de Euler que controlam a rotação do
         // terceiro cubo.
@@ -442,6 +504,9 @@ int main(int argc, char* argv[])
 
         // Imprimimos na informação sobre a matriz de projeção sendo utilizada.
         TextRendering_ShowProjection(window);
+
+        // Imprimimos na tela a velocidade atual do jogador.
+        TextRendering_ShowPlayerSpeed(window);
 
         // Imprimimos na tela informação sobre o número de quadros renderizados
         // por segundo (frames per second).
@@ -467,6 +532,207 @@ int main(int argc, char* argv[])
 
     // Fim do programa
     return 0;
+}
+
+// Atualiza a velocidade e a posição do jogador. O jogador está sempre em um
+// de dois estados: deslizando sobre o terreno ou voando. Veja
+// UpdatePlayerOnGround() e UpdatePlayerInAir().
+void UpdatePlayer(float delta_t)
+{
+    bool diving = g_LeftMouseButtonPressed;
+
+    if (g_PlayerOnGround)
+        UpdatePlayerOnGround(delta_t, diving);
+    else
+        UpdatePlayerInAir(delta_t, diving);
+}
+
+// Gravidade que age sobre o jogador quando ele está no ar. Com "dive", ele cai
+// rápido; sem "dive", ele plana, caindo devagar.
+float PlayerAirGravity(bool diving)
+{
+    return PLAYER_GRAVITY * (diving ? PLAYER_DIVE_GRAVITY_MULT : PLAYER_GLIDE_GRAVITY_MULT);
+}
+
+// Jogador deslizando sobre o terreno. Sem "dive", ele anda na velocidade
+// base. Com "dive" (botão esquerdo do mouse pressionado), a gravidade passa a
+// agir, acelerando o jogador nas descidas e freando nas subidas.
+void UpdatePlayerOnGround(float delta_t, bool diving)
+{
+    // Normal do terreno no ponto de contato do jogador. Para uma superfície
+    // y = h(x), a normal é (-dh/dx, 1, 0), normalizada. Veja "terrain.cpp".
+    float slope = TerrainSlope(g_PlayerContactX, 0.0f);
+    float len   = sqrtf(slope*slope + 1.0f);
+    glm::vec4 n = glm::vec4(-slope/len, 1.0f/len, 0.0f, 0.0f);
+
+    if (diving)
+    {
+        // A gravidade g = (0,-G,0) se decompõe em uma componente na direção
+        // da normal, que é anulada pelo chão, e uma componente tangente ao
+        // terreno, que acelera o jogador. Com a tangente t = (1, dh/dx, 0)/len
+        // (sentido de movimento, +x), a componente tangente é
+        // g·t = -G*(dh/dx)/len = G*n.x. Ou seja: quanto mais a normal se
+        // inclina para frente (descida), maior a aceleração; se ela se
+        // inclina para trás (subida), o jogador desacelera.
+        float gravity_acceleration = PLAYER_GRAVITY * n.x;
+
+        // A diferença para a velocidade base se dissipa aos poucos. Sem isso,
+        // o limite inferior abaixo injetaria energia a cada subida e a
+        // velocidade poderia crescer indefinidamente.
+        float drag_acceleration = -PLAYER_DRAG * (g_PlayerSpeed - PLAYER_BASE_SPEED);
+
+        g_PlayerSpeed += (gravity_acceleration + drag_acceleration) * delta_t;
+
+        // Nas subidas o jogador pode ficar mais lento que a base, mas nunca
+        // para nem anda para trás.
+        g_PlayerSpeed = std::max(g_PlayerSpeed, PLAYER_MIN_SPEED);
+    }
+    else
+    {
+        // Sem "dive", a velocidade volta para a base. Usamos um decaimento
+        // exponencial em vez de atribuir a base diretamente, para evitar um
+        // salto brusco de velocidade ao soltar o botão.
+        g_PlayerSpeed += (PLAYER_BASE_SPEED - g_PlayerSpeed) * std::min(1.0f, PLAYER_RETURN_RATE * delta_t);
+    }
+
+    // No chão, a velocidade é tangente ao terreno: v = speed * t, com a
+    // tangente t = (1, dh/dx, 0)/len.
+    float vx = g_PlayerSpeed / len;
+    float vy = g_PlayerSpeed * slope / len;
+
+    // Decolagem: verificamos onde o centro do jogador estaria no próximo
+    // instante se estivesse livre, sujeito apenas à gravidade (trajetória
+    // balística). Se nessa posição a esfera não tocar mais o terreno, é porque
+    // o terreno se curva para baixo mais rápido do que o jogador cai (topo de
+    // um morro em alta velocidade), e ele decola. Equivalentemente: a
+    // aceleração centrípeta necessária para acompanhar a curva,
+    // speed²*curvatura, supera a gravidade. O teste usa a mesma função de
+    // distância que o pouso em UpdatePlayerInAir(), para que os dois sejam
+    // consistentes.
+    //
+    // Além disso, só é possível decolar com embalo: a velocidade base sozinha
+    // nunca tira o jogador do chão. Exigimos uma folga acima da base (e não
+    // apenas speed > base) porque, sem "dive", a velocidade se aproxima da
+    // base exponencialmente e fica indefinidamente um pouco acima dela.
+    bool has_momentum = g_PlayerSpeed >= PLAYER_BASE_SPEED + PLAYER_TAKEOFF_MIN_EXCESS;
+
+    float next_x = g_PlayerX + vx*delta_t;
+    float next_y = g_PlayerY + vy*delta_t - 0.5f*PlayerAirGravity(diving)*delta_t*delta_t;
+    float unused_contact_x;
+
+    if (has_momentum && PlayerDistanceToTerrain(next_x, next_y, &unused_contact_x) > PLAYER_RADIUS)
+    {
+        g_PlayerOnGround = false;
+        g_PlayerVX = vx;
+        g_PlayerVY = vy;
+        return;
+    }
+
+    // Ainda no chão: o ponto de contato avança pela projeção horizontal da
+    // velocidade, e o centro da esfera é reposicionado sobre ele.
+    g_PlayerContactX += vx * delta_t;
+    PlacePlayerOnGround();
+}
+
+// Posiciona o centro da esfera do jogador sobre o ponto de contato
+// g_PlayerContactX. O centro fica a uma distância igual ao raio ao longo da
+// normal do terreno, e não simplesmente acima do ponto de contato: nas rampas,
+// deslocar o centro apenas em y faria a esfera atravessar o terreno.
+void PlacePlayerOnGround()
+{
+    float slope = TerrainSlope(g_PlayerContactX, 0.0f);
+    float len   = sqrtf(slope*slope + 1.0f);
+
+    g_PlayerX = g_PlayerContactX + PLAYER_RADIUS * (-slope/len);
+    g_PlayerY = TerrainHeight(g_PlayerContactX, 0.0f) + PLAYER_RADIUS * (1.0f/len);
+}
+
+// Distância do ponto (cx,cy) até o perfil do terreno, y = h(x). Também
+// retorna, em contact_x, a coordenada x do ponto do terreno mais próximo.
+// Quando a distância é menor ou igual ao raio, a esfera centrada em (cx,cy)
+// toca o terreno nesse ponto.
+float PlayerDistanceToTerrain(float cx, float cy, float* contact_x)
+{
+    // Quadrado da distância de (cx,cy) até o ponto (x, h(x)) do terreno
+    auto dist2 = [cx, cy](float x) {
+        float dy = TerrainHeight(x, 0.0f) - cy;
+        return (x - cx)*(x - cx) + dy*dy;
+    };
+
+    // Um ponto do terreno a uma distância menor que o raio está
+    // necessariamente no intervalo [cx - raio, cx + raio]. Primeiro
+    // amostramos esse intervalo para encontrar a região do mínimo...
+    const int   num_samples = 16;
+    const float step = 2.0f * PLAYER_RADIUS / num_samples;
+    float best_x = cx - PLAYER_RADIUS;
+    for (int i = 1; i <= num_samples; ++i)
+    {
+        float x = cx - PLAYER_RADIUS + i*step;
+        if (dist2(x) < dist2(best_x))
+            best_x = x;
+    }
+
+    // ... e depois refinamos com busca da seção áurea ao redor da melhor
+    // amostra. A precisão importa: o teste de decolagem compara distâncias
+    // que diferem do raio em apenas ~1e-5 entre um quadro e o próximo.
+    const float golden = 0.6180340f;
+    float a = best_x - step;
+    float b = best_x + step;
+    for (int i = 0; i < 30; ++i)
+    {
+        float x1 = b - golden*(b - a);
+        float x2 = a + golden*(b - a);
+        if (dist2(x1) < dist2(x2))
+            b = x2;
+        else
+            a = x1;
+    }
+
+    *contact_x = 0.5f*(a + b);
+    return sqrtf(dist2(*contact_x));
+}
+
+// Jogador voando. Ele segue uma trajetória balística, com a gravidade
+// controlada pelo "dive", até tocar o terreno novamente.
+void UpdatePlayerInAir(float delta_t, bool diving)
+{
+    // Também no ar o jogador nunca para nem anda para trás.
+    g_PlayerVX = std::max(g_PlayerVX, PLAYER_MIN_SPEED);
+
+    // Movimento com aceleração constante: y += vy*dt - g*dt²/2. Usamos a
+    // fórmula exata (e não y += vy*dt após atualizar vy) para que a
+    // trajetória seja a mesma prevista pelo teste de decolagem em
+    // UpdatePlayerOnGround(). Caso contrário, nos topos dos morros o jogador
+    // decolaria e pousaria em quadros alternados.
+    float g = PlayerAirGravity(diving);
+    g_PlayerX += g_PlayerVX * delta_t;
+    g_PlayerY += g_PlayerVY * delta_t - 0.5f * g * delta_t * delta_t;
+    g_PlayerVY -= g * delta_t;
+
+    // Planando, a velocidade de queda é limitada, como um paraquedas.
+    if (!diving)
+        g_PlayerVY = std::max(g_PlayerVY, -PLAYER_GLIDE_MAX_FALL);
+
+    // Velocidade mostrada na tela
+    g_PlayerSpeed = sqrtf(g_PlayerVX*g_PlayerVX + g_PlayerVY*g_PlayerVY);
+
+    // A esfera ainda não toca o terreno?
+    float contact_x;
+    if (PlayerDistanceToTerrain(g_PlayerX, g_PlayerY, &contact_x) > PLAYER_RADIUS)
+        return;
+
+    // Pouso: a velocidade se decompõe em uma componente tangente ao terreno,
+    // que é mantida, e uma componente na direção da normal, que é absorvida
+    // pelo chão. Assim, pousar alinhado com uma descida mantém quase toda a
+    // velocidade, enquanto pousar de frente para uma subida a perde.
+    float slope = TerrainSlope(contact_x, 0.0f);
+    float len   = sqrtf(slope*slope + 1.0f);
+    float v_along = (g_PlayerVX + g_PlayerVY*slope) / len; // v·t, com t = (1, dh/dx)/len
+
+    g_PlayerSpeed    = std::max(v_along, PLAYER_MIN_SPEED);
+    g_PlayerContactX = contact_x;
+    g_PlayerOnGround = true;
+    PlacePlayerOnGround();
 }
 
 // Função que carrega uma imagem para ser utilizada como textura
@@ -496,8 +762,11 @@ void LoadTextureImage(const char* filename)
     glGenSamplers(1, &sampler_id);
 
     // Veja slides 95-96 do documento Aula_20_Mapeamento_de_Texturas.pdf
-    glSamplerParameteri(sampler_id, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glSamplerParameteri(sampler_id, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    // GL_REPEAT: coordenadas de textura fora de [0,1] repetem a imagem. Isso é
+    // necessário para o terreno, cujas coordenadas de textura crescem
+    // indefinidamente com a posição no mundo (veja "terrain.cpp").
+    glSamplerParameteri(sampler_id, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glSamplerParameteri(sampler_id, GL_TEXTURE_WRAP_T, GL_REPEAT);
 
     // Parâmetros de amostragem da textura.
     glSamplerParameteri(sampler_id, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
@@ -1124,13 +1393,14 @@ void MouseButtonCallback(GLFWwindow* window, int button, int action, int mods)
 // cima da janela OpenGL.
 void CursorPosCallback(GLFWwindow* window, double xpos, double ypos)
 {
-    // Abaixo executamos o seguinte: caso o botão esquerdo do mouse esteja
+    // Abaixo executamos o seguinte: caso o botão direito do mouse esteja
     // pressionado, computamos quanto que o mouse se movimento desde o último
     // instante de tempo, e usamos esta movimentação para atualizar os
     // parâmetros que definem a posição da câmera dentro da cena virtual.
     // Assim, temos que o usuário consegue controlar a câmera.
+    // O botão esquerdo é usado para o "dive" do jogador (veja UpdatePlayer()).
 
-    if (g_LeftMouseButtonPressed)
+    if (g_RightMouseButtonPressed)
     {
         // Deslocamento do cursor do mouse em x e y de coordenadas de tela!
         float dx = xpos - g_LastCursorPosX;
@@ -1149,22 +1419,6 @@ void CursorPosCallback(GLFWwindow* window, double xpos, double ypos)
     
         if (g_CameraPhi < phimin)
             g_CameraPhi = phimin;
-    
-        // Atualizamos as variáveis globais para armazenar a posição atual do
-        // cursor como sendo a última posição conhecida do cursor.
-        g_LastCursorPosX = xpos;
-        g_LastCursorPosY = ypos;
-    }
-
-    if (g_RightMouseButtonPressed)
-    {
-        // Deslocamento do cursor do mouse em x e y de coordenadas de tela!
-        float dx = xpos - g_LastCursorPosX;
-        float dy = ypos - g_LastCursorPosY;
-    
-        // Atualizamos parâmetros da antebraço com os deslocamentos
-        g_ForearmAngleZ -= 0.01f*dx;
-        g_ForearmAngleX += 0.01f*dy;
     
         // Atualizamos as variáveis globais para armazenar a posição atual do
         // cursor como sendo a última posição conhecida do cursor.
@@ -1381,6 +1635,22 @@ void TextRendering_ShowProjection(GLFWwindow* window)
         TextRendering_PrintString(window, "Perspective", 1.0f-13*charwidth, -1.0f+2*lineheight/10, 1.0f);
     else
         TextRendering_PrintString(window, "Orthographic", 1.0f-13*charwidth, -1.0f+2*lineheight/10, 1.0f);
+}
+
+// Escrevemos na tela a velocidade atual do jogador.
+void TextRendering_ShowPlayerSpeed(GLFWwindow* window)
+{
+    if ( !g_ShowInfoText )
+        return;
+
+    float lineheight = TextRendering_LineHeight(window);
+
+    char buffer[40];
+    snprintf(buffer, 40, "Speed = %.2f%s%s", g_PlayerSpeed,
+             g_PlayerOnGround ? "" : "  [AIR]",
+             g_LeftMouseButtonPressed ? "  [DIVE]" : "");
+
+    TextRendering_PrintString(window, buffer, -1.0f, 1.0f-lineheight, 1.0f);
 }
 
 // Escrevemos na tela o número de quadros renderizados por segundo (frames per

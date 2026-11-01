@@ -532,3 +532,719 @@ O texto no canto da tela (`TextRendering_ShowProjection`) mostra qual está ativ
 - **Ortográfica**: o tamanho não muda com a distância e o paralelismo se mantém. Para não ficar sem zoom, o código faz o `t` crescer com `g_CameraDistance`, e a rolagem do mouse "aproxima" mesmo assim.
 
 **No Hasty Wings**, o jogo deve usar **perspectiva**. Ela passa a sensação de velocidade, com o terreno vindo na direção da câmera e as rampas crescendo ao se aproximar, que é o que o vídeo de referência mostra. Vocês podem manter a ortográfica pela tecla O se o enunciado pedir as duas projeções. Se não pedir, dá para deixar a perspectiva fixa.
+
+===== USUÁRIO [2026-11-01 14:40:24] =====
+<ide_opened_file>The user opened the file /home/rafastephanou/Projects/ProjetoCG/TrabalhoCG/.git/COMMIT_EDITMSG in the IDE. This may or may not be related to the current task.</ide_opened_file>
+Como tu faria pra fazer um terreno infinito?
+
+----- CLAUDE [2026-11-01 14:41:00] -----
+Eu faria um **terreno procedural em pedaços (chunks)** que vão sendo reciclados conforme o pássaro avança. Na prática, o terreno nunca existe inteiro na memória. Existem só alguns pedaços em volta do jogador, e todos são gerados pela mesma função matemática.
+
+## 1. A base: uma função de altura `h(x, z)`
+
+O mais importante é definir o terreno como uma **função** em vez de um modelo `.obj`:
+
+```cpp
+float TerrainHeight(float x, float z);  // retorna a altura y do chão em (x,z)
+```
+
+Essa função fica como única fonte de verdade para tudo:
+- **renderização**: os vértices de cada chunk são `(x, h(x,z), z)`;
+- **física**: o pássaro está no chão se `passaro.y <= h(passaro.x, passaro.z)`;
+- **inclinação da rampa**: a derivada de `h`, que define se ele é lançado ou ganha velocidade na descida.
+
+Como `h` é determinística (o mesmo `x` dá sempre a mesma altura), dá para gerar qualquer trecho do terreno a qualquer momento, e ele "continua" sem emendas.
+
+### Como fazer os morros no estilo Tiny Wings
+
+Eu usaria **pontos de controle com altura pseudoaleatória, ligados por uma curva cúbica suave**:
+
+```cpp
+// Altura "aleatória" mas determinística para o ponto de controle i
+float ControlHeight(int i) {
+    unsigned int h = i * 374761393u;
+    h = (h ^ (h >> 13)) * 1274126177u;
+    return (h & 0xFFFF) / 65535.0f * AMPLITUDE;
+}
+
+float TerrainHeight(float x, float z) {
+    float s = x / SPACING;               // espaçamento entre os topos dos morros
+    int   i = (int)floor(s);
+    float t = s - i;                     // posição local em [0,1)
+    // Hermite com tangentes nulas → morros e vales suaves, como em Tiny Wings
+    float t2 = t*t*(3 - 2*t);
+    return mix(ControlHeight(i), ControlHeight(i+1), t2);
+}
+```
+
+Isso cai direto na **Aula 16 (Curvas e Superfícies)**. Dá para trocar a interpolação por uma **Bézier cúbica** ou uma **Catmull-Rom** e escolher o formato das rampas, o que provavelmente ajuda a cumprir algum requisito do enunciado sobre curvas. Para variar a pista na direção `z`, basta somar um termo leve, como `0.3*sin(z*0.5)`.
+
+## 2. Chunks reciclados (o "infinito")
+
+Como o jogo avança quase sempre numa direção só, como em Haste, uma fila de chunks basta:
+
+```
+    [chunk 0][chunk 1][chunk 2][chunk 3][chunk 4]  →  direção do pássaro
+        ↑ pássaro aqui
+```
+
+- Cada chunk é uma **grade de N×M vértices** (por exemplo 64×32) cobrindo um trecho de, digamos, 20 unidades.
+- Na inicialização, você cria `K` chunks (por exemplo 6), cada um com seu VAO/VBO, reaproveitando o código de `BuildTrianglesAndAddToVirtualScene`.
+- Todo quadro: quando o pássaro **passa** do chunk mais antigo, esse chunk vai para a frente da fila. Os vértices dele são recalculados para a nova posição e reenviados com `glBufferSubData`. Os índices não mudam, porque a topologia da grade é sempre a mesma.
+
+Assim não há alocação nova durante o jogo, só uma atualização de VBO a cada poucos segundos. Isso é bem leve.
+
+## 3. Normais sem `ComputeNormals`
+
+Como `h` é uma função, a normal sai direto das derivadas (diferenças finitas):
+
+```cpp
+const float e = 0.01f;
+float dhdx = (TerrainHeight(x+e, z) - TerrainHeight(x-e, z)) / (2*e);
+float dhdz = (TerrainHeight(x, z+e) - TerrainHeight(x, z-e)) / (2*e);
+glm::vec4 n = normalize(glm::vec4(-dhdx, 1.0f, -dhdz, 0.0f));
+```
+
+Esse mesmo `dhdx` dá a **inclinação** que a física do pássaro precisa.
+
+## 4. Textura que não "emenda"
+
+Calcule as coordenadas de textura a partir da **posição no mundo**, não do índice do chunk:
+
+```glsl
+U = position_world.x * 0.2;
+V = position_world.z * 0.2;
+```
+
+Isso exige `GL_REPEAT` no sampler, que hoje está `CLAMP_TO_EDGE` em `LoadTextureImage`. Com isso, a textura passa de um chunk para o outro sem costura.
+
+## 5. Esconder o fim do mundo
+
+Os chunks acabam em algum lugar, e o `farplane = -10` atual corta tudo muito perto. Duas medidas:
+- aumentar o `farplane` para algo como `-200`, e gerar chunks até um pouco antes disso;
+- adicionar **neblina** no fragment shader, misturando a cor com a cor do céu conforme a distância:
+  ```glsl
+  float d = length(camera_position - p);
+  color.rgb = mix(color.rgb, cor_do_ceu, smoothstep(80.0, 180.0, d));
+  ```
+  Isso também combina com o pôr do sol, já que `cor_do_ceu` pode vir do mesmo uniform `hora_do_dia`.
+
+## Alternativa mais simples (se faltar tempo)
+
+Uma **grade única que acompanha o pássaro**: a malha é fixa e plana, e o **vertex shader** calcula `y = h(x,z)` a partir da posição no mundo. O infinito sai de graça, sem gerenciar chunks. A desvantagem é que `h` precisa existir duplicada em C++ (para a física) e em GLSL (para o desenho), e as duas versões têm que bater exatamente. Além disso, a grade precisa andar em passos do tamanho da célula, senão o terreno parece "ondular". Por isso eu prefiro os chunks.
+
+Quer que eu comece implementando a `TerrainHeight` e um primeiro chunk no `main.cpp`, só para vocês verem o terreno na tela?
+
+===== USUÁRIO [2026-11-01 14:43:17] =====
+Nao entendi como curvas de bezier seriam usadas pra geracao do terreno
+
+----- CLAUDE [2026-11-01 14:43:43] -----
+A ideia é tratar o **perfil do terreno** (a altura `y` ao longo de `x`, a direção em que o pássaro corre) como uma sequência de **curvas de Bézier cúbicas emendadas**. Cada curva liga o topo de um morro ao fundo do vale seguinte, depois do vale ao próximo topo, e assim por diante.
+
+## Um segmento: do topo ao vale
+
+Uma Bézier cúbica tem 4 pontos de controle e é definida por:
+
+$$
+B(t) = (1-t)^3 P_0 + 3t(1-t)^2 P_1 + 3t^2(1-t) P_2 + t^3 P_3,\quad t\in[0,1]
+$$
+
+Para um trecho do terreno:
+
+```
+ y
+ │  P0●────●P1                       P0 = topo do morro
+ │      ‾‾‾‾‾╲                       P3 = fundo do vale
+ │             ╲                     P1 = ao lado de P0, mesma altura
+ │               ╲___                P2 = ao lado de P3, mesma altura
+ │            P2●────●P3
+ └──────────────────────────── x
+```
+
+- **P0 e P3** são os pontos por onde a curva **passa**: o topo e o vale.
+- **P1 e P2** não ficam na curva. Eles **puxam** a curva e definem as tangentes. Com P1 na mesma altura de P0, a curva sai do topo **na horizontal**. Com P2 na mesma altura de P3, ela chega ao vale também na horizontal. O resultado é um morro arredondado, sem bico.
+
+## Como ter a altura num `x` qualquer
+
+Aqui tem uma pegadinha. A Bézier dá `x` **e** `y` em função de `t`, mas a física precisa do contrário: "o pássaro está em `x = 37.2`, qual é a altura do chão?"
+
+O truque é espaçar os pontos de controle **igualmente em x**:
+
+```
+P0.x = x0,  P1.x = x0 + Δ/3,  P2.x = x0 + 2Δ/3,  P3.x = x0 + Δ
+```
+
+Com esse espaçamento, `x(t)` fica **linear** em `t`, e então `t = (x − x0) / Δ` sai direto. Só o `y` é curvo:
+
+```cpp
+float BezierTerrainHeight(float x)
+{
+    int   i  = (int)floor(x / SPACING);           // qual segmento
+    float t  = x / SPACING - i;                   // posição dentro dele, em [0,1)
+
+    float y0 = ControlHeight(i);                  // P0.y (pseudoaleatório)
+    float y3 = ControlHeight(i + 1);              // P3.y
+    float y1 = y0;                                // P1.y = P0.y → tangente horizontal
+    float y2 = y3;                                // P2.y = P3.y → tangente horizontal
+
+    float s = 1.0f - t;
+    return s*s*s*y0 + 3*t*s*s*y1 + 3*t*t*s*y2 + t*t*t*y3;
+}
+```
+
+## O código que mostrei antes já era isso
+
+Com `y1 = y0` e `y2 = y3`, a Bézier se simplifica:
+
+$$
+y(t) = y_0\,\underbrace{(1 - 3t^2 + 2t^3)}_{} + y_3\,(3t^2 - 2t^3)
+$$
+
+Essa é exatamente a interpolação `mix(y0, y3, t*t*(3-2*t))` da resposta anterior. Ou seja, aquele `smoothstep` **é** uma Bézier cúbica com tangentes horizontais. A diferença é que, escrevendo na forma de Bézier, vocês controlam o formato.
+
+## O que a Bézier dá a mais
+
+Mexendo em P1 e P2, vocês controlam a **forma de cada rampa**:
+
+- **Descida longa e subida curta e íngreme**, que vira uma rampa de lançamento: coloque P2 mais perto de P3 e P1 mais longe de P0. A curva desce devagar e "dobra" no fim.
+- **Topos achatados** (platôs): P1 e P2 bem próximos das pontas.
+- **Variedade**: sorteie (de forma determinística) a posição de P1 e P2 para cada segmento, e cada morro fica diferente.
+
+Para não ter "quinas" nas emendas entre segmentos, o P2 de um segmento, o ponto de junção P3 e o P1 do próximo segmento precisam ficar **na mesma reta** (continuidade da tangente, G¹/C¹, da Aula 16). Com tangentes horizontais isso já acontece automaticamente: os três pontos têm a mesma altura.
+
+## Ligando com o resto
+
+- A derivada da Bézier dá a **inclinação** em cada ponto, exatamente o que a mecânica de momentum precisa:
+  $$B'(t) = 3(1-t)^2(P_1-P_0) + 6t(1-t)(P_2-P_1) + 3t^2(P_3-P_2)$$
+- A **malha** do chunk continua sendo uma grade. Cada vértice só pergunta `BezierTerrainHeight(x)` para saber a altura.
+- No relatório, vocês podem dizer que o terreno é uma **superfície gerada pela extrusão, ao longo de `z`, de uma curva de Bézier cúbica por partes**. Isso deixa explícito o uso do conceito da aula.
+
+===== USUÁRIO [2026-11-01 14:45:17] =====
+Pode implementar.
+
+----- CLAUDE [2026-11-01 14:51:10] -----
+Implementei o terreno infinito. Na captura acima, a esfera, que por enquanto faz o papel do pássaro, rola pelos morros e a câmera acompanha de lado. Rodei o jogo por até 12 segundos (uns 60 de distância). Nesse tempo vários pedaços do terreno foram reaproveitados à frente sem buraco nem emenda visível, e não apareceu erro de shader no terminal.
+
+## Como funciona
+
+Todo o terreno ficou num arquivo novo, [src/terrain.cpp](src/terrain.cpp).
+
+- **Perfil por Bézier:** a altura do chão em cada `x` vem de uma curva de Bézier cúbica por partes. Cada trecho liga um topo de morro a um vale. Os topos ficam entre 2 e 4 de altura e os vales entre −1 e 0,5, sorteados de um jeito que sempre dá o mesmo resultado para o mesmo `x`. As tangentes são horizontais, então as emendas entre trechos não têm quina.
+- **Inclinação:** `TerrainSlope` calcula a inclinação pela derivada da Bézier. A física do pássaro vai usar essa função, e a normal da iluminação sai dela também.
+- **Pedaços reciclados:** só 8 pedaços de 16 unidades existem na GPU ao mesmo tempo, um atrás do jogador e o resto na frente. O pedaço que fica para trás tem os vértices recalculados para a frente e reenviados para a GPU.
+- **Textura:** as coordenadas de textura vêm da posição no mundo, então a textura passa de um pedaço para o outro sem costura.
+
+## O que mudou no resto do código
+
+- [main.cpp](src/main.cpp):
+  - **Jogador provisório:** `g_PlayerX` avança a 5 unidades por segundo, para dar para ver o terreno sendo gerado.
+  - **Câmera:** agora gira em torno do jogador, não da origem. Ela começa afastada (distância 16, um pouco elevada) para ficar fora da faixa do terreno.
+  - **Far plane:** foi de −10 para −150.
+  - **Cena:** o terreno substituiu o plano do chão, a esfera rola sobre ele e o coelho fica parado no começo da pista.
+- **Texturas:** troquei `CLAMP_TO_EDGE` por `GL_REPEAT` em `LoadTextureImage`, para todas as texturas.
+- [shader_fragment.glsl](src/shader_fragment.glsl): incluí o objeto `TERRAIN` e uma neblina que esconde o fim do terreno. A cor da neblina é a mesma do fundo.
+- [CMakeLists.txt](CMakeLists.txt): incluí o `terrain.cpp` na compilação.
+
+## O que ficou de fora
+
+- **Sem descida geral:** o terreno sobe e desce, mas no conjunto é plano. Se a mecânica de momento precisar de uma descida contínua, dá para somar um termo como `-0.05f * x` em `TerrainHeight`.
+- **Formato das rampas:** P1 e P2 ainda ficam na mesma altura das pontas. Moldar rampas de lançamento mexendo neles é o próximo passo natural, quando a física existir.
+- **Commit:** não fiz commit.
+
+===== USUÁRIO [2026-11-01 14:55:16] =====
+Eu quero que a velocidade do objeto seja definida por uma taxa base, pra que impeca ele de parar ou ir pra tras + gravidade simulada, que aumenta ou diminui conforme a orientacao da normal do terreno.
+
+----- CLAUDE [2026-11-01 14:56:52] -----
+Implementei a física: a velocidade agora tem um piso (a taxa base) e muda com a inclinação do terreno. Na captura, a esfera está no topo de um morro com `Speed = 5.00`. Ela acabou de subir e foi segurada na taxa base, em vez de parar.
+
+## Como funciona
+
+Tudo fica na função nova `UpdatePlayer()` em [main.cpp](src/main.cpp), chamada a cada quadro com o tempo que passou desde o quadro anterior.
+
+1. **Gravidade a partir da normal.** A gravidade `(0, −G, 0)` tem uma parte perpendicular ao chão, que o chão cancela, e uma parte ao longo do chão. A parte ao longo do chão se reduz a:
+   $$a_{\text{grav}} = G \cdot n_x$$
+   Na descida a normal inclina para frente (`n.x > 0`) e o objeto acelera. Na subida ela inclina para trás e ele desacelera. No topo e no vale a normal aponta reto para cima e a aceleração é zero.
+2. **Taxa base.** Depois de somar a aceleração, `g_PlayerSpeed = max(g_PlayerSpeed, PLAYER_BASE_SPEED)`. Numa subida íngreme o objeto desacelera até 5 e fica nisso: nunca para nem volta.
+3. **Arrasto.** A velocidade acima da base vai diminuindo aos poucos. Isso é necessário porque o piso injeta energia a cada subida: sem o arrasto, a velocidade cresceria para sempre. Simulei 10 minutos de jogo e ela ficou entre 5,0 e 10,6.
+4. **Deslocamento.** A velocidade é medida ao longo da superfície, então o avanço em `x` é a parte horizontal dela (`velocidade / len`). Numa rampa íngreme o objeto anda menos em `x` com a mesma velocidade.
+
+## Para ajustar
+
+As constantes ficam juntas no começo do [main.cpp](src/main.cpp):
+
+| Constante | Valor | Efeito |
+|---|---|---|
+| `PLAYER_BASE_SPEED` | 5.0 | velocidade mínima |
+| `PLAYER_GRAVITY` | 9.8 | quanto as rampas aceleram e freiam |
+| `PLAYER_DRAG` | 0.15 | quão rápido o excesso de velocidade some (menor = mantém o embalo por mais tempo) |
+
+## Limitação
+
+O objeto continua **colado no chão**. Ao passar o topo de um morro em alta velocidade, ele desce acompanhando a curva em vez de ser lançado no ar. Para o lançamento das rampas do Hasty Wings, o próximo passo é dar estado de voo ao jogador: posição `y` e velocidade vertical próprias, com a gravidade agindo livremente no ar e uma checagem de pouso contra `TerrainHeight`. O "dive" entra aí também, aumentando a gravidade enquanto o botão estiver apertado.
+
+Também coloquei a velocidade no canto superior esquerdo da tela, para ajudar a ajustar as constantes. A tecla H esconde esse texto junto com os outros.
+
+===== USUÁRIO [2026-11-01 14:58:19] =====
+Eu quero agora que a gravidade so seja aplicada com o dive (clicar botao esquerdo). Sem dive, andamos sempre na taxa base. Se damos dive, o fator da gravidade entra na conta, podendo aumentar a velocidade ou diminuir, mas nunca deve chegar a 0
+
+----- CLAUDE [2026-11-01 15:00:14] -----
+Agora a gravidade só age com o dive (botão esquerdo apertado). Sem dive, o objeto anda na velocidade base de 5. Com dive, ele acelera nas descidas e freia nas subidas, mas nunca fica abaixo de 1. O jogo compila e roda sem erros. Testei a física numa simulação à parte, mas não testei o clique de verdade, porque não consigo clicar na janela daqui.
+
+## O que mudou em `UpdatePlayer()`
+
+- **Com dive:** a aceleração é a da resposta anterior, a gravidade projetada pela normal (`G · n.x`) mais o arrasto. A velocidade pode cair abaixo da base nas subidas, mas o piso agora é `PLAYER_MIN_SPEED = 1.0`, então o objeto nunca para nem volta.
+- **Sem dive:** a velocidade volta para a base em cerca de meio segundo, em vez de pular direto para 5. **Isso é diferente do que você pediu:** você disse "sempre na taxa base", e eu suavizei para o objeto não dar um tranco ao soltar o botão. Se quiser a troca instantânea, aumente `PLAYER_RETURN_RATE` (algo como 1000 já resolve).
+
+## Simulação de 5 minutos para cada estratégia
+
+| Estratégia | Velocidade | Distância |
+|---|---|---|
+| Sem dive | sempre 5,0 | 1371 |
+| Dive o tempo todo | 1,0 a 9,3 | 1138 |
+| Dive só nas subidas | 1,0 a 5,0 | 599 |
+| **Dive só nas descidas** | **5,0 a 10,5** | **1753** |
+
+A mecânica premia o timing: dar dive na descida e soltar antes da subida rende cerca de 28% mais distância do que não dar dive. Dar dive na hora errada pune bastante.
+
+## Controles mudaram
+
+- **Botão esquerdo:** dive. A tela mostra `[DIVE]` ao lado da velocidade.
+- **Botão direito + arrastar:** gira a câmera. Antes era o esquerdo. Para liberar o direito, removi o código que movia o antebraço de um laboratório antigo, que o jogo não usava.
+- **Roda do mouse:** zoom, como antes.
+
+===== USUÁRIO [2026-11-01 16:21:40] =====
+Estou curioso em como funciona a variacao de velocidade? Se eu estivesse em uma linha decrescente continua e parasse de apertar o dash no meio do caminho, a velocidade se estabilizaria de maneira continua ou discreta?
+
+----- CLAUDE [2026-11-01 16:22:01] -----
+A volta é **contínua**: a velocidade desce suavemente até a base, sem salto. Tecnicamente ela muda em degraus, um por quadro, mas os degraus são tão pequenos que você não percebe.
+
+## O que acontece quando você solta o botão
+
+Sem dive, a inclinação do terreno é **ignorada**, então tanto faz estar descendo. A cada quadro o código faz:
+
+```cpp
+g_PlayerSpeed += (PLAYER_BASE_SPEED - g_PlayerSpeed) * std::min(1.0f, PLAYER_RETURN_RATE * delta_t);
+```
+
+Ou seja, a cada quadro a velocidade anda **uma fração fixa da distância que falta** até a base. Com `PLAYER_RETURN_RATE = 3` e 144 fps, essa fração é `3 × (1/144) ≈ 2,1%`. Isso é um **decaimento exponencial**:
+
+$$
+v(t) \approx 5 + (v_0 - 5)\, e^{-3t}
+$$
+
+Exemplo: soltando o botão a 10 de velocidade.
+
+| Tempo depois de soltar | Velocidade | Excesso que sobra |
+|---|---|---|
+| 0 s | 10,00 | 100% |
+| 0,25 s | 7,36 | 47% |
+| 0,5 s | 6,12 | 22% |
+| 1 s | 5,25 | 5% |
+| 1,5 s | 5,06 | 1% |
+
+A queda é **rápida no começo e cada vez mais lenta**, porque quanto mais perto da base, menor a diferença, e menor o passo. Na matemática ela nunca chega exatamente a 5. Na prática, em uns 2 segundos fica indistinguível.
+
+## Contínuo ou discreto?
+
+- **Na tela:** contínuo. São 144 passos por segundo, cada um mudando a velocidade em no máximo 2% do que falta. Não há tranco.
+- **No código:** discreto. É uma aproximação de Euler da exponencial acima, com um passo por quadro. Como o passo depende de `delta_t`, o resultado é praticamente o mesmo a 30 ou a 144 fps. O `min(1, ...)` protege contra quadros muito lentos: sem ele, um quadro de mais de 1/3 s "passaria do ponto" e a velocidade ficaria abaixo da base.
+
+A outra opção era fazer `g_PlayerSpeed = PLAYER_BASE_SPEED` direto ao soltar. Aí sim seria **discreto**: de 10 para 5 em um único quadro, um tranco visível.
+
+## Curiosidade: e se você **segurar** o dive numa descida contínua?
+
+A velocidade também não cresce para sempre. Ela tende a uma **velocidade terminal**, quando a gravidade empata com o arrasto:
+
+$$
+G\, n_x = 0{,}15\,(v - 5) \;\Rightarrow\; v_{\text{terminal}} = 5 + \frac{G\, n_x}{0{,}15}
+$$
+
+Numa rampa de 45° (`n_x ≈ 0,71`), isso dá cerca de **51**. Nos morros atuais você nunca chega perto disso, porque as descidas são curtas: o máximo na simulação foi 10,5. Se vocês fizerem descidas longas, esse é o teto.
+
+===== USUÁRIO [2026-11-01 16:24:16] =====
+Perfeito. Agora comom fariamos pra bola decolar e planar?
+
+----- CLAUDE [2026-11-01 16:24:45] -----
+Dá para fazer sem mexer no terreno. A ideia é o jogador ter **dois estados**, *no chão* e *no ar*, e trocar entre eles por uma regra física simples.
+
+## 1. Estado do jogador
+
+Hoje o jogador só tem `x` e uma velocidade ao longo do chão. No ar ele precisa de uma posição e de uma velocidade em 2D:
+
+```cpp
+float g_PlayerX, g_PlayerY;     // posição (y deixa de ser sempre TerrainHeight)
+float g_PlayerVX, g_PlayerVY;   // velocidade
+bool  g_PlayerOnGround;
+```
+
+No chão, o vetor velocidade é a velocidade escalar de hoje vezes a **tangente** do terreno:
+
+$$\vec v = v\,\vec t = v\,\frac{(1,\; h'(x))}{\sqrt{1+h'^2}}$$
+
+## 2. Decolagem: quando o chão "foge" da bola
+
+A bola sai do chão quando, **sem nada a segurando, ela ficaria acima do terreno**. No topo de um morro, o chão curva para baixo. Se a bola estiver rápida, ela continuaria reto (seguindo a trajetória balística) e o chão sumiria embaixo dela.
+
+O teste prático, a cada quadro no chão:
+
+```cpp
+// Onde a bola estaria no próximo quadro se estivesse livre (só gravidade)
+float next_x = x + vx*dt;
+float next_y = y + vy*dt - 0.5f*G*dt*dt;
+
+if (next_y > TerrainHeight(next_x, 0))   // o chão curvou para baixo mais rápido que a queda
+    g_PlayerOnGround = false;             // decolou, mantendo vx e vy
+```
+
+Esse é o critério físico de verdade: a bola descola quando a aceleração centrípeta que ela precisaria para acompanhar a curva (`v²·κ`, onde κ é a curvatura) passa da gravidade. Com os morros atuais, a curvatura no topo é cerca de `6Δh/L² ≈ 0,4`. Então a bola decola em topos com velocidade acima de mais ou menos `√(G/κ) ≈ 5`. Sem dive ela raspa no limite, e com o embalo do dive (10) ela voa de verdade. **Quem desce bem é lançado mais longe**, sem nenhuma regra especial no código.
+
+## 3. No ar: planar ou mergulhar
+
+No ar a gravidade **precisa** agir sempre, senão a bola não volta. O dive passa a controlar **quanto**:
+
+```cpp
+float g = diving ? G * DIVE_MULT    // mergulho: cai rápido, para pousar na descida
+                 : G * GLIDE_MULT;  // planando: cai devagar, voo longo
+vy -= g * dt;
+vy  = std::max(vy, -MAX_GLIDE_FALL);   // sem dive: limita a velocidade de queda (paraquedas)
+x  += vx * dt;
+y  += vy * dt;
+```
+
+Valores para começar: `GLIDE_MULT ≈ 0.35`, `DIVE_MULT ≈ 2.5`, `MAX_GLIDE_FALL ≈ 4`. Planar significa principalmente **cair devagar mantendo `vx`**. Se quiserem algo mais elaborado, dá para converter um pouco de `vx` em sustentação, mas isso não é necessário para o efeito.
+
+## 4. Pouso: alinhamento conta
+
+Quando `y <= TerrainHeight(x)`, a bola pousou. A velocidade se divide em duas partes: a **ao longo** do terreno (que fica) e a **contra** o terreno (que o chão absorve):
+
+```cpp
+float v_along = vx*t.x + vy*t.y;   // projeção na tangente
+y = TerrainHeight(x, 0);
+g_PlayerSpeed = std::max(v_along, PLAYER_MIN_SPEED);
+g_PlayerOnGround = true;
+```
+
+Isso dá exatamente a mecânica do SPEC, *"pousar alinhado com as rampas e manter velocidade"*:
+- **Pousar numa descida**, com a trajetória paralela ao chão: quase toda a velocidade é mantida.
+- **Pousar numa subida**, ou de cara no chão: a projeção é pequena e a velocidade cai muito.
+
+Por isso o dive no ar é útil: ele serve para "mirar" a descida do próximo morro.
+
+## 5. Ajustes no resto
+
+- **Câmera:** ela olha para `(x, y)` do jogador, e isso já funciona. Talvez valha suavizar o `y` dela, para não sacudir no pouso.
+- **Taxa base no ar:** `vx` deve ficar ≥ algo como 1, pelo mesmo motivo de nunca parar.
+- **Terreno:** se a decolagem ficar tímida, dá para aumentar a altura dos morros ou encurtar os segmentos. Mais curvatura no topo significa decolar com menos velocidade.
+
+Quer que eu implemente? Seriam essas mudanças em `UpdatePlayer()`, com os valores acima como ponto de partida para ajustar jogando.
+
+===== USUÁRIO [2026-11-01 16:27:19] =====
+Pode implementar
+
+----- CLAUDE [2026-11-01 16:31:57] -----
+Implementei: a bola agora decola nos topos dos morros, plana, e o dive faz ela mergulhar. Sem nenhum clique, ela fica no ar por volta de metade do tempo, com saltos de até ~1,8 de altura. O jogo compila e roda sem erros. As capturas acima mostram vários momentos em `[AIR]`.
+
+## Como ficou
+
+Agora o jogador tem dois estados. A `UpdatePlayer()` chama `UpdatePlayerOnGround()` ou `UpdatePlayerInAir()` conforme o estado atual.
+
+**No chão:** a velocidade funciona como antes. A cada quadro, o código calcula onde a bola estaria se estivesse livre, só com a gravidade. Se essa posição ficar acima do terreno, ela decola, levando a velocidade que tinha ao longo da rampa.
+
+**No ar:** a gravidade passa a agir sempre:
+- **sem dive:** 0,35 G, com queda máxima de 4 (planar);
+- **com dive:** 2,5 G, para descer rápido e "mirar" a descida do próximo morro.
+
+**No pouso:** só a parte da velocidade ao longo do terreno é mantida. Pousar alinhado com uma descida conserva o embalo, e pousar contra uma subida perde quase tudo, como no SPEC.
+
+## Bug que encontrei e corrigi
+
+A primeira versão parecia certa nas capturas, mas a simulação contou **cerca de 4500 decolagens em 5 minutos**. A bola decolava e pousava em quadros alternados ao passar pelos topos.
+
+A causa: o teste de decolagem calculava a queda exata (`½·g·dt²`), mas o voo atualizava a velocidade antes da posição, o que dá o dobro de queda no primeiro quadro. Nos topos, a queda do chão ficava entre os dois valores: o teste dizia "decolou" e o voo dizia "pousou". Troquei o voo pela fórmula exata do movimento com aceleração constante (`y += vy·dt − ½·g·dt²`), a mesma do teste.
+
+Depois disso, ficou **um voo por morro**, e o comportamento é igual a 30, 60 e 144 fps. As duas tentativas anteriores (testar mais à frente no tempo e usar a gravidade normal no teste) não resolveram e não ficaram no código.
+
+## Simulação de 5 minutos (144 fps)
+
+| Estratégia | Distância | Tempo no ar |
+|---|---|---|
+| Sem dive | 1357 | 54% |
+| Dive nas descidas, no chão e no ar | **1713** | 20% |
+
+Mergulhar para colar na descida e ganhar embalo rende cerca de 26% mais distância do que só planar.
+
+## Para ajustar jogando
+
+As constantes novas estão junto das outras, no começo do [main.cpp](src/main.cpp):
+
+| Constante | Valor | Efeito |
+|---|---|---|
+| `PLAYER_GLIDE_GRAVITY_MULT` | 0.35 | menor = voos mais longos e decolagens mais fáceis |
+| `PLAYER_DIVE_GRAVITY_MULT` | 2.5 | maior = mergulho mais rápido |
+| `PLAYER_GLIDE_MAX_FALL` | 4.0 | limite da queda planando |
+
+## O que falta
+
+- **Câmera:** como ela segue a bola exatamente, a bola fica sempre no centro da tela e o voo aparece como o terreno se mexendo embaixo dela. Suavizar o `y` da câmera, com um pequeno atraso, deixaria a altura do salto bem mais visível. Esse é o próximo passo que eu sugiro.
+- **Visual do voo:** a esfera continua girando no ar como se estivesse rolando.
+
+===== USUÁRIO [2026-11-01 16:33:12] =====
+Eu quero com que a velocidade base nao seja capaz de tirar a bola do chao
+
+----- CLAUDE [2026-11-01 16:35:22] -----
+Feito: a velocidade base não tira mais a bola do chão. Ela só decola com embalo, e esse embalo agora dura o bastante para chegar ao topo. O jogo compila e roda sem erros.
+
+## As duas mudanças
+
+**1. Regra de decolagem** (`UpdatePlayerOnGround()`): além do teste físico, a bola precisa estar pelo menos **0,5 acima da velocidade base** para decolar (`PLAYER_TAKEOFF_MIN_EXCESS`). Só o teste físico não bastava: no morro mais pontudo, a velocidade 5 já supera a gravidade. Comparar com "maior que 5" também não servia, porque depois de qualquer dive a velocidade fica para sempre um pouco acima de 5.
+
+**2. Volta à base mais lenta:** `PLAYER_RETURN_RATE` passou de 3,0 para 1,0, como você escolheu. Sem dive, o excesso de velocidade cai para cerca de um terço por segundo, e a velocidade fica perto da base em uns 3 segundos. Antes ele sumia em ~1 s, e a subida leva ~1,6 s, então a bola sempre chegava ao topo só com a velocidade base.
+
+## Resultado na simulação (5 minutos)
+
+| Estratégia | Distância | Voos | Altura máx. |
+|---|---|---|---|
+| Sem dive | 1371 | **0** | — |
+| Dive só no chão, nas descidas | 1658 | 51 | 5,0 |
+| Dive nas descidas, no chão e no ar | **2724** | 169 | 3,3 |
+
+Quem não dá dive anda colado no chão para sempre. Quem acerta o timing voa em quase todo morro e percorre o dobro da distância.
+
+Uma consequência que vale saber: com a volta à base mais lenta, a velocidade máxima subiu de ~10,5 para ~19,5 para quem joga bem. O embalo acumula de um morro para o outro. Se ficar rápido demais quando vocês jogarem, os ajustes são aumentar `PLAYER_DRAG` (freia mais durante o dive) ou voltar `PLAYER_RETURN_RATE` para algo entre 1 e 2.
+
+===== USUÁRIO [2026-11-01 16:36:32] =====
+a bola aparenta estar entrando no chao durante subidas e decidas
+
+----- CLAUDE [2026-11-01 16:39:11] -----
+Corrigido: a bola não afunda mais nas rampas. A causa era a que expliquei acima: o centro ficava reto acima do ponto de contato, e numa rampa de ~43° isso enterrava a bola uns 0,13 no chão (mais de um quarto do raio). Agora o centro fica **ao longo da normal**: `centro = contato + r·n`. No teste com o código real, a penetração máxima caiu para **0,0001**, menos de um pixel. As capturas acima não comprovam muito, porque nesse ângulo de câmera o próprio terreno da frente esconde o contato; a evidência é o teste numérico.
+
+## O que mudou
+
+**Estado do jogador:**
+- `g_PlayerX`/`g_PlayerY` agora são sempre o **centro** da esfera. A câmera e o desenho usam ele direto.
+- `g_PlayerContactX` (novo) guarda o ponto de contato quando a bola está no chão.
+- `PLAYER_RADIUS` substituiu os `0.5f` espalhados.
+
+**Funções novas:**
+- `PlacePlayerOnGround()` coloca o centro a uma distância `r` do ponto de contato, ao longo da normal.
+- `PlayerDistanceToTerrain()` calcula a distância real entre o centro e o terreno e diz qual é o ponto de contato. Ela amostra o trecho abaixo da bola e depois refina com busca da seção áurea. A precisão é necessária, porque o teste de decolagem compara diferenças de ~0,00001.
+
+**Decolagem e pouso** passaram a usar o mesmo critério, a distância centro–terreno comparada com o raio:
+- decola se, na próxima posição livre, a esfera deixaria de tocar o chão;
+- pousa quando a esfera volta a tocar, e o contato é o ponto mais próximo do terreno.
+
+Como os dois testes usam a mesma medida, a bola não pipoca nos topos. Também não há "pulo" visual no pouso: o ponto mais próximo do centro fica justamente na direção da normal, então o centro não se desloca ao trocar de estado.
+
+## Como testei
+
+Desta vez a simulação **extrai as funções de física direto do `main.cpp`** em vez de reescrever a lógica à mão. Ela testou o código que vai rodar no jogo:
+
+| Estratégia | Distância | Voos | Penetração máx. |
+|---|---|---|---|
+| Sem dive | 1370 | 0 | 0,0000 |
+| Dive no chão, nas descidas | 1652 | 51 | 0,0000 |
+| Dive nas descidas, no chão e no ar | 2624 | 163 | 0,0001 |
+
+O comportamento de jogo ficou praticamente igual ao anterior.
+
+===== USUÁRIO [2026-11-01 16:41:59] =====
+me explqieu como tu gerou o terreno com curvas de bezier
+
+----- CLAUDE [2026-11-01 16:42:37] -----
+O terreno é uma **curva de Bézier cúbica por partes** (o perfil do morro, em 2D) **arrastada ao longo do eixo z** para virar uma superfície 3D. Tudo está em [terrain.cpp](src/terrain.cpp).
+
+## 1. Os pontos por onde a curva passa
+
+Ao longo de `x`, a cada `TERRAIN_SEGMENT_LENGTH = 8` unidades, existe um ponto de controle `i`. A altura dele vem de `ControlPointHeight(i)` ([terrain.cpp:55](src/terrain.cpp#L55)):
+
+- **`i` par**: topo de morro, altura sorteada entre 2 e 4;
+- **`i` ímpar**: fundo de vale, altura sorteada entre −1 e 0,5.
+
+O "sorteio" é uma função hash do próprio `i`. O mesmo `i` sempre dá a mesma altura, então qualquer pedaço do terreno pode ser recalculado a qualquer momento e sempre sai igual. É isso que permite o terreno infinito.
+
+```
+ y
+ 4 ┤   ●               ●                    ● = ponto de controle i
+   │                         ●                 (topos e vales alternados)
+ 2 ┤         
+ 0 ┤         ●     
+-1 ┤                     ●         ●
+   └───┬─────┬─────┬─────┬─────┬─────┬──▶ x
+       0     8    16    24    32    40
+      i=0   i=1   i=2   i=3   i=4   i=5
+```
+
+## 2. Um segmento = uma Bézier cúbica
+
+Entre dois pontos vizinhos `i` e `i+1` há uma Bézier cúbica com 4 pontos de controle ([terrain.cpp:78](src/terrain.cpp#L78)):
+
+```
+P0 = (x_i,        y_i)       ← começa no ponto i
+P1 = (x_i + L/3,  y_i)       ← mesma altura de P0
+P2 = (x_i + 2L/3, y_{i+1})   ← mesma altura de P3
+P3 = (x_i + L,    y_{i+1})   ← termina no ponto i+1
+```
+
+```
+ P0 ●━━━━━━━━● P1
+     ‾‾‾‾‾╲              A curva passa por P0 e P3.
+            ╲            P1 e P2 só "puxam" a curva: como estão na
+             ╲___        mesma altura das pontas, ela sai e chega
+       P2 ●━━━━━━━━● P3  na horizontal → morros arredondados.
+```
+
+## 3. Como calcular a altura num `x` qualquer
+
+Uma Bézier dá `(x, y)` em função de um parâmetro `t ∈ [0,1]`. Mas o jogo pergunta o contrário: *"em `x = 37,2`, qual a altura?"*.
+
+O truque é que P0, P1, P2 e P3 estão **igualmente espaçados em x** (a 0, L/3, 2L/3 e L). Com isso, a parte `x(t)` da Bézier vira uma reta, e `t` sai direto de `x`:
+
+```cpp
+float s = x / TERRAIN_SEGMENT_LENGTH;   // 37,2 / 8 = 4,65
+int   i = (int)floorf(s);               // segmento 4
+t = s - i;                              // t = 0,65 dentro dele
+```
+
+Depois, `TerrainHeight` ([terrain.cpp:91](src/terrain.cpp#L91)) aplica a fórmula da Bézier (polinômios de Bernstein) só no `y`:
+
+$$
+y(t) = (1-t)^3\,y_0 + 3t(1-t)^2\,y_1 + 3t^2(1-t)\,y_2 + t^3\,y_3
+$$
+
+```cpp
+float s = 1.0f - t;
+return s*s*s*y0 + 3.0f*t*s*s*y1 + 3.0f*t*t*s*y2 + t*t*t*y3;
+```
+
+## 4. A inclinação: derivada da Bézier
+
+`TerrainSlope` ([terrain.cpp:102](src/terrain.cpp#L102)) usa a derivada da Bézier, que é uma Bézier quadrática dos vetores entre os pontos de controle:
+
+$$
+\frac{dy}{dt} = 3(1-t)^2(y_1-y_0) + 6t(1-t)(y_2-y_1) + 3t^2(y_3-y_2)
+$$
+
+Como queremos `dy/dx`, e não `dy/dt`, entra a regra da cadeia: `t = x/L` dá `dt/dx = 1/L`, então `dy/dx = (dy/dt) / L`.
+
+Essa inclinação é usada em três lugares: na **normal** da iluminação, na **gravidade** do dive (`G · n.x`) e nos testes de **decolagem e pouso**.
+
+## 5. Por que não há quinas nas emendas
+
+Na Aula 16, duas Béziers emendam de forma suave quando:
+
+- **C⁰ (posição):** o fim de uma é o começo da outra. Aqui, o `P3` do segmento `i` e o `P0` do segmento `i+1` são o mesmo ponto `(x_{i+1}, y_{i+1})`.
+- **C¹ (tangente):** `P2`, o ponto de junção e o `P1` do próximo segmento ficam na mesma reta. Aqui os três têm a mesma altura `y_{i+1}`, ou seja, estão numa reta horizontal.
+
+Isso foi conferido numericamente: o salto de altura nas emendas é ~0,0000002 (erro de arredondamento) e a inclinação é contínua.
+
+## 6. Da curva para a superfície 3D
+
+A superfície é a **extrusão** do perfil em `z`: `h(x, z) = y(x)`, a mesma curva repetida em toda a largura da pista. `FillChunk` ([terrain.cpp:117](src/terrain.cpp#L117)) amostra essa função numa grade de 65 × 21 vértices por chunk:
+
+```cpp
+float y = TerrainHeight(x, z);                // posição do vértice
+float dhdx = TerrainSlope(x, z);              // normal = (-dh/dx, 1, 0) normalizada
+texture_coefficients.push_back(x * 0.25f);    // textura pela posição no mundo
+```
+
+Cada quadrado da grade vira 2 triângulos, e o resultado é uma malha comum, desenhada com `glDrawElements` como os `.obj`.
+
+## Uma observação honesta, para o relatório
+
+Com `y1 = y0` e `y2 = y3`, essa Bézier se simplifica para
+$$y(t) = y_0 + (y_3 - y_0)\,(3t^2 - 2t^3)$$
+que é a curva de Hermite com tangentes nulas (o `smoothstep`). Ou seja, hoje os pontos internos P1 e P2 não dão nenhuma liberdade extra: estão "travados" para garantir a tangente horizontal.
+
+Para o uso de Bézier ficar mais evidente e útil, dá para soltá-los. Por exemplo, deslocar P1 e P2 em `x` gera rampas assimétricas (descida longa e subida curta, ótima para lançamento). A condição de C¹ continua sendo manter P2, a junção e o P1 seguinte alinhados. Mas se o espaçamento em `x` deixar de ser igual, `x(t)` deixa de ser linear, e achar `t` a partir de `x` passa a exigir uma busca numérica.
+
+===== USUÁRIO [2026-11-01 16:43:56] =====
+Pode ver como estava o projeto quando eu commitei? Falta botar o titulo
+
+----- CLAUDE [2026-11-01 16:44:11] -----
+Vi o estado do repositório. Você está no meio de um commit: o `COMMIT_EDITMSG` aberto ainda não tem mensagem, e o que está **preparado (staged)** para esse commit é só:
+
+- `.claude/hooks/log_history.py` (novo)
+- `.gitignore` (modificado)
+- `prompt_history.txt` (novo)
+
+Ou seja, esse commit só traz o **registro automático das conversas**. Sugestão de título para a primeira linha do `COMMIT_EDITMSG`:
+
+```
+Registro automático das conversas em prompt_history.txt
+```
+
+Se quiser um corpo também (deixe uma linha em branco depois do título):
+
+```
+Registro automático das conversas em prompt_history.txt
+
+Hook do Claude Code que grava cada prompt e cada resposta no
+prompt_history.txt. A configuração local (.claude/settings.local.json)
+fica fora do repositório via .gitignore.
+```
+
+Depois é só salvar e fechar a aba do editor para o commit ser concluído.
+
+Todo o trabalho de código desta conversa **não** está nesse commit, porque não foi adicionado ao staging. Isso inclui o terreno com Bézier, a física com dive, o voo e a correção da penetração (`src/terrain.cpp`, `src/main.cpp`, `src/shader_fragment.glsl`, `CMakeLists.txt`). Acho bom mesmo que fique num commit separado. Quando quiser, faço esse segundo commit, com algo como `Terreno infinito com curvas de Bézier e física de dive/voo`.
+
+===== USUÁRIO [2026-11-01 16:45:02] =====
+pq n consigo escrever?
+
+----- CLAUDE [2026-11-01 16:45:34] -----
+O motivo: o commit foi iniciado pelo botão **Commit** do VS Code com a caixa de mensagem vazia. Nesse caso, o VS Code abre o `COMMIT_EDITMSG` num modo especial e fica esperando você fechar a aba. Esse processo está parado há **2 horas** (dá para ver o `git commit` ainda rodando), e a aba que você está vendo provavelmente não é mais a que ele controla, ou abriu como somente leitura. Por isso ela não aceita digitação.
+
+Para contornar, escrevi o título direto no arquivo:
+
+```
+Registro automático das conversas em prompt_history.txt
+```
+
+**Para concluir:** feche a aba do `COMMIT_EDITMSG`. O git lê o arquivo nesse momento e faz o commit com essa mensagem. Se o VS Code perguntar se quer salvar, escolha **não salvar**, porque o arquivo no disco já está certo.
+
+**Se fechar a aba não concluir o commit,** o processo travou. Aí é mais simples cancelar e refazer:
+1. No terminal: `kill 204872` (cancela o commit pendente; os arquivos continuam no staging).
+2. Escreva o título na caixa de mensagem do painel Source Control e clique em **Commit**.
+
+Se quiser, eu cancelo e faço o commit por aqui com essa mensagem.
+
+===== USUÁRIO [2026-11-01 18:15:00] =====
+Ainda nao consigo digitar no source control do vscode
+
+----- CLAUDE [2026-11-01 18:15:25] -----
+O sistema de permissões não me deixou encerrar o processo, então vai precisar ser feito por você.
+
+**O que está acontecendo:** o `git commit` já terminou e não aconteceu commit nenhum (o último ainda é `930cab2`). Mas sobrou um processo auxiliar do VS Code, o `git-editor`, esperando a aba `COMMIT_EDITMSG` fechar. Enquanto ele não termina, o VS Code acha que tem um commit em andamento e deixa a caixa do Source Control bloqueada.
+
+**Para destravar,** escolha uma das opções:
+
+1. **Fechar a aba `COMMIT_EDITMSG`** no editor. Se não houver aba aberta, ou se fechar não adiantar, vá para a opção 2.
+2. **Encerrar o auxiliar** no terminal:
+   ```bash
+   kill 204873 204874 204875
+   ```
+3. **Recarregar a janela:** `Ctrl+Shift+P` → "Developer: Reload Window".
+
+Depois disso, a caixa do Source Control volta a aceitar texto. Os três arquivos (`log_history.py`, `.gitignore`, `prompt_history.txt`) continuam no staging, então é só escrever o título e clicar em **Commit**.
+
+Se preferir, posso fazer o commit pelo terminal com `git commit -m "Registro automático das conversas em prompt_history.txt"`, mas só depois que o auxiliar for encerrado.
+
+===== USUÁRIO [2026-11-01 18:18:48] =====
+<ide_opened_file>The user opened the file /home/rafastephanou/Projects/ProjetoCG/TrabalhoCG/.gitignore in the IDE. This may or may not be related to the current task.</ide_opened_file>
+Ve se commitei algo ai
+
+----- CLAUDE [2026-11-01 18:19:00] -----
+Ainda não tem commit novo. O último continua sendo o `930cab2 Observações do Professor corrigidas` (23/09), e o branch está igual ao `origin/main`.
+
+A parte boa: o processo que travava o Source Control já terminou, então a caixa de mensagem deve aceitar texto agora.
+
+Situação atual dos arquivos:
+
+| Arquivo | Estado |
+|---|---|
+| `.claude/hooks/log_history.py` | no staging (novo) |
+| `.gitignore` | no staging |
+| `prompt_history.txt` | no staging, com alterações mais novas fora dele |
+| `CMakeLists.txt`, `src/main.cpp`, `src/shader_fragment.glsl` | modificados, fora do staging |
+| `src/terrain.cpp` | novo, ainda não rastreado pelo git |
+
+Se você commitar agora pelo Source Control, entram só os três arquivos do staging. O terreno e a física ficam de fora. Quer que eu faça os dois commits por aqui (um para o registro das conversas, outro para o terreno e a física) ou prefere fazer você?

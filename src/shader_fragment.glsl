@@ -19,9 +19,10 @@ uniform mat4 view;
 uniform mat4 projection;
 
 // Identificador que define qual objeto está sendo desenhado no momento
-#define SPHERE 0
-#define BUNNY  1
-#define PLANE  2
+#define SPHERE  0
+#define BUNNY   1
+#define PLANE   2
+#define TERRAIN 3
 uniform int object_id;
 
 // Parâmetros da axis-aligned bounding box (AABB) do modelo
@@ -134,11 +135,30 @@ void main()
 		// Obtemos a refletância difusa a partir da leitura da imagem TextureImage1
 		Kd0 = texture(TextureImage1, vec2(U,V)).rgb;
     }
+    else if ( object_id == TERRAIN )
+    {
+        // Coordenadas de textura do terreno, computadas em "terrain.cpp" a
+        // partir da posição no mundo. Como crescem indefinidamente, a
+        // imagem se repete (GL_REPEAT).
+        U = texcoords.x;
+        V = texcoords.y;
+
+		Kd0 = texture(TextureImage1, vec2(U,V)).rgb;
+    }
 
     // Equação de Iluminação
     float lambert = max(0,dot(n,l));
 
     color.rgb = Kd0 * (lambert + 0.01);
+
+    // Neblina: misturamos a cor do fragmento com a cor do céu conforme a
+    // distância até a câmera. Isso esconde o fim do terreno, já que apenas
+    // alguns chunks existem ao mesmo tempo (veja "terrain.cpp").
+    // A cor do céu é a mesma de glClearColor() em "main.cpp", convertida para
+    // o espaço linear, pois a correção gamma abaixo será aplicada a ela.
+    vec3 sky_color = pow(vec3(0.9, 0.9, 1.0), vec3(2.2));
+    float fog = smoothstep(40.0, 90.0, length(camera_position - p));
+    color.rgb = mix(color.rgb, sky_color, fog);
 
     // NOTE: Se você quiser fazer o rendering de objetos transparentes, é
     // necessário:
