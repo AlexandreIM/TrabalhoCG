@@ -1,0 +1,534 @@
+
+===== USUÁRIO [2026-11-01 12:27:33] =====
+Oi. Eu quero que durante esse projeto, tu registre automaciaemtne nossas conversas no prompt_history
+
+----- CLAUDE [2026-11-01 12:27:41] -----
+Configurei o registro automático. De agora em diante, as conversas vão para o `prompt_history.txt` sozinhas.
+
+**Como funciona:**
+- Toda mensagem que você enviar é gravada com data e hora, sob `===== USUÁRIO [...] =====`.
+- Quando eu termino de responder, o texto da minha resposta é gravado sob `----- CLAUDE [...] -----`. Só vai o texto, sem os comandos e ferramentas que usei no caminho.
+
+**O que foi criado:**
+- [.claude/hooks/log_history.py](.claude/hooks/log_history.py): o script que escreve no histórico.
+- [.claude/settings.local.json](.claude/settings.local.json): faz o Claude Code rodar o script a cada mensagem e a cada resposta.
+- Coloquei o `settings.local.json` no [.gitignore](.gitignore), porque é configuração pessoal. O `prompt_history.txt` continua sendo um arquivo normal que você pode commitar.
+
+Testei o script com entradas de exemplo e ele gravou certo. Ainda não vi ele rodar de verdade numa conversa. Sua primeira mensagem já está no arquivo; registrei ela à mão, porque chegou antes da configuração existir.
+
+**Um passo seu:** a pasta `.claude/` não existia quando esta sessão começou, então o Claude Code pode ainda não ter carregado a configuração. Abra `/hooks` uma vez ou reinicie a sessão para ativar. Se esta minha resposta não aparecer no arquivo, é esse o motivo. O `/hooks` também serve para ver ou desligar o registro depois.
+
+===== USUÁRIO [2026-11-01 12:29:10] =====
+Beleza. Eu quero que tu me explique como esse projeto realiza a geracao de imagens, usando os conceitos explicados em Downloads/CGV
+
+----- CLAUDE [2026-11-01 12:30:22] -----
+Quase tudo no projeto acontece em três arquivos: [main.cpp](src/main.cpp), [shader_vertex.glsl](src/shader_vertex.glsl) e [shader_fragment.glsl](src/shader_fragment.glsl). Antes de começar: por enquanto o código ainda é a base do professor (esfera, coelho e plano), não o Hasty Wings. Mas o jogo vai gerar imagens pelo mesmo caminho, então tudo abaixo continua valendo.
+
+## Visão geral: rasterização (Aula 03)
+
+A Aula 03 compara dois algoritmos de rendering: **Ray Casting** e **Rasterização**. O projeto usa rasterização, que é o que o OpenGL faz:
+
+```
+for object in scene
+  for pixel covered by object
+    "pixel color = object color"
+```
+
+No código, o `for object in scene` são as três chamadas `DrawVirtualObject(...)` dentro do loop principal ([main.cpp:338-458](src/main.cpp#L338-L458)). Esse loop roda uma vez por quadro e segue as etapas do **Pipeline Gráfico** dos slides:
+
+**Aplicação → Geometria (Model/View, Vertex Shading, Projeção, Clipping, Screen Mapping) → Rasterização → Imagem (framebuffer)**
+
+## 1. Aplicação: modelagem geométrica (Aula 04)
+
+Os objetos são **malhas de triângulos** lidas de arquivos `.obj` (`ObjModel spheremodel("../../data/sphere.obj")`, [main.cpp:306](src/main.cpp#L306)).
+
+- **Normais por vértice**: se o arquivo não traz normais, `ComputeNormals()` ([main.cpp:630](src/main.cpp#L630)) calcula a normal de cada triângulo com o produto vetorial `(b−a)×(c−a)`. Depois tira a média das normais de todos os triângulos que tocam cada vértice, que é o método de Gouraud.
+- **Envio para a GPU**: `BuildTrianglesAndAddToVirtualScene()` ([main.cpp:747](src/main.cpp#L747)) coloca posições, normais e coordenadas de textura em **VBOs** e organiza tudo num **VAO**. As posições vão em coordenadas homogêneas `(x,y,z,1)` e as normais como vetores `(x,y,z,0)`, como nos Fundamentos Matemáticos (Aula 02).
+
+## 2. Model Matrix: Model Coords → World Coords (Aulas 06/07 e 08)
+
+Cada objeto recebe uma **matriz de modelagem** feita de translações e rotações, por exemplo a esfera ([main.cpp:418](src/main.cpp#L418)):
+
+```cpp
+model = Matrix_Translate(-1,0,0) * Matrix_Rotate_Z(0.6) * Matrix_Rotate_X(0.2) * Matrix_Rotate_Y(...);
+```
+
+As transformações valem **da direita para a esquerda**: primeiro gira em Y, depois em X e em Z, e por último translada. A Aula 08 mostra que isso é uma **mudança de sistema de coordenadas**, do sistema local do objeto para o sistema global (World). O tempo (`glfwGetTime()`) entra no ângulo de rotação, e por isso os objetos giram sozinhos.
+
+## 3. View Matrix: World → Camera Coords (Aula 08)
+
+A câmera é do tipo **look-at**. A posição `c` sai de **coordenadas esféricas** (`r`, `θ`, `φ`, controladas pelo mouse), e a câmera olha sempre para a origem ([main.cpp:361-374](src/main.cpp#L361-L374)).
+
+`Matrix_Camera_View()` ([matrices.h:224](include/matrices.h#L224)) monta a base da câmera igual aos slides:
+- `w = −view` (a câmera olha para −w)
+- `u = up × w`, depois normalizado
+- `v = w × u`
+
+A matriz tem `u`, `v` e `w` como linhas e `−u·(c−o)` etc. na última coluna. Ela escreve qualquer ponto do mundo nas coordenadas da câmera.
+
+## 4. Projeção: Camera → Clip → NDC (Aula 09)
+
+O código tem as duas **projeções planares** da Aula 09, e as teclas P/O trocam entre elas:
+
+- **Ortográfica** (`Matrix_Orthographic`): leva a caixa `[l,r]×[b,t]×[f,n]` para o cubo `[−1,1]³`. Preserva paralelismo e tamanhos relativos.
+- **Perspectiva** (`Matrix_Perspective`, [matrices.h:269](include/matrices.h#L269)): aplica a matriz **P** (com `n`, `n+f`, `−fn` e o `1` na última linha, que copia z para w) e depois a ortográfica **M**. O resultado é `−M·P`. O sinal negativo deixa `w > 0`, porque a GPU testa o clipping como `−w ≤ x ≤ w` antes da divisão (o comentário no código explica bem). O FOV é π/3, e `near = −0.1`, `far = −10` são negativos porque a câmera olha para −z.
+
+No vertex shader, cada vértice passa por toda a cadeia:
+
+```glsl
+gl_Position = projection * view * model * model_coefficients;
+```
+
+Depois disso a própria GPU faz o **clipping**, descartando o que fica fora do **frustum**, e a **divisão por w**, que dá as NDC. É essa divisão que deixa menores os objetos mais longe.
+
+## 5. Screen Mapping (Viewport)
+
+`glViewport(0, 0, width, height)` ([main.cpp:1053](src/main.cpp#L1053)) leva as NDC `[−1,1]` para coordenadas de pixel da janela.
+
+## 6. Rasterização, Z-buffer e Culling (Aulas 03 e 09)
+
+- O rasterizador encontra os pixels que cada triângulo cobre e **interpola** os valores `out` do vertex shader (`position_world`, `normal`, `texcoords`), gerando um valor por **fragmento**.
+- **Z-buffer** (`glEnable(GL_DEPTH_TEST)`): quando dois objetos caem no mesmo pixel, fica o mais próximo da câmera. É o "pixel color = closest object color" dos slides.
+- **Backface culling** (`GL_CULL_FACE`, `GL_CCW`): triângulos de costas para a câmera nem são desenhados.
+
+## 7. Fragment Shader: cor de cada pixel (Aulas 17/18 e 20/21)
+
+### Texturas (Aula 20)
+A **refletância difusa Kd** muda de ponto para ponto, porque é lida de uma imagem. Cada objeto usa uma **função de parametrização φ(p) = (u,v)** diferente:
+
+| Objeto | Parametrização | Código |
+|---|---|---|
+| Esfera | **Projeção esférica**: `θ = atan(x,z)`, `φ = asin(y/ρ)`, normalizados para [0,1] | [shader_fragment.glsl:62-82](src/shader_fragment.glsl#L62-L82) |
+| Coelho | **Projeção planar XY**: `u` e `v` são x e y normalizados pela bounding box (AABB) | [shader_fragment.glsl:83-111](src/shader_fragment.glsl#L83-L111) |
+| Plano | Coordenadas de textura que já vêm no `.obj` | [shader_fragment.glsl:112-120](src/shader_fragment.glsl#L112-L120) |
+
+As duas primeiras usam `position_model`, ou seja, **coordenadas do modelo**. Assim a textura acompanha o objeto quando ele gira. Em `LoadTextureImage()` ([main.cpp:473](src/main.cpp#L473)) aparecem os conceitos de amostragem da Aula 20/21: **wrapping** (`CLAMP_TO_EDGE`), **mipmapping** (`glGenerateMipmap`) e filtragem **trilinear** (`LINEAR_MIPMAP_LINEAR`) para a minificação e **bilinear** para a magnificação.
+
+### Iluminação (Aulas 17/18)
+Por enquanto o modelo é só **Lambert** (termo difuso), com um **termo ambiente** bem pequeno:
+
+```glsl
+float lambert = max(0, dot(n, l));      // cos θ entre normal e luz
+color.rgb = Kd0 * (lambert + 0.01);
+```
+
+- `l = (1,1,0)` é uma luz direcional fixa.
+- A normal vai para o mundo com a **inversa da transposta** da matriz model ([shader_vertex.glsl:58](src/shader_vertex.glsl#L58)). Isso mantém a normal perpendicular à superfície mesmo com escalas não uniformes (Aula 07).
+- A iluminação é calculada **por fragmento**, com a normal interpolada. É o **Phong shading** (interpolação de normais), diferente do **Gouraud shading**, que calcula a cor nos vértices e interpola a cor.
+- O shader já calcula `v` (o vetor até a câmera), mas ainda não usa. Ele seria usado para acrescentar o **termo especular** (Phong ou Blinn-Phong: `ks·I·max(0, r·v)^q`) e chegar à equação completa da Aula 17/18.
+
+### Correção gamma
+No final, `pow(color, 1/2.2)` converte a cor do espaço linear para **sRGB** do monitor. As texturas são carregadas como `GL_SRGB8`, então a GPU faz a conversão contrária na leitura. Com isso, toda a conta de iluminação acontece em espaço linear.
+
+## 8. Imagem final
+
+O resultado vai para o **framebuffer**. `glfwSwapBuffers()` faz o **double buffering**: o quadro é desenhado num buffer escondido e só depois trocado com o da tela, o que evita *tearing*.
+
+---
+
+**Para o Hasty Wings**, esse caminho fica igual. O que muda é a cena: o terreno com rampas (provavelmente uma superfície gerada por código, ligada à Aula 16 de Curvas e Superfícies), a câmera seguindo o pássaro (outra forma de calcular `c` e o vetor view), os coletáveis e o termo especular na iluminação.
+
+Se quiser, posso detalhar alguma etapa com as contas, por exemplo multiplicando um vértice concreto pelas matrizes até chegar no pixel.
+
+===== USUÁRIO [2026-11-01 12:36:31] =====
+<ide_selection>The user selected the lines 418 to 424 from /home/rafastephanou/Projects/ProjetoCG/TrabalhoCG/src/main.cpp:
+model = Matrix_Translate(-1.0f,0.0f,0.0f)
+              * Matrix_Rotate_Z(0.6f)
+              * Matrix_Rotate_X(0.2f)
+              * Matrix_Rotate_Y(g_AngleY + (float)glfwGetTime() * 0.1f);
+        glUniformMatrix4fv(g_model_uniform, 1 , GL_FALSE , glm::value_ptr(model));
+        glUniform1i(g_object_id_uniform, SPHERE);
+        DrawVirtualObject("the_sphere");
+
+This may or may not be related to the current task.</ide_selection>
+
+
+<pasted_content id="e3c4">
+model = Matrix_Translate(-1.0f,0.0f,0.0f)
+              * Matrix_Rotate_Z(0.6f)
+              * Matrix_Rotate_X(0.2f)
+              * Matrix_Rotate_Y(g_AngleY + (float)glfwGetTime() * 0.1f);
+        glUniformMatrix4fv(g_model_uniform, 1 , GL_FALSE , glm::value_ptr(model));
+        glUniform1i(g_object_id_uniform, SPHERE);
+        DrawVirtualObject("the_sphere");
+</pasted_content id="e3c4">
+
+ a matriz de translacao eh pra posicionar a esfera na posicao dela relativa a oroigem? E pra que servem as demais matrizes?
+
+----- CLAUDE [2026-11-01 12:36:43] -----
+Sim. `Matrix_Translate(-1, 0, 0)` coloca a esfera 1 unidade à esquerda da origem do mundo. O centro dela, que no próprio modelo fica em (0,0,0), vai parar em (−1, 0, 0) no mundo.
+
+As três rotações orientam a esfera. Leia o produto **da direita para a esquerda**, porque essa é a ordem em que as matrizes agem no vértice:
+
+```
+p_mundo = T · Rz · Rx · Ry · p_modelo
+```
+
+1. **`Rotate_Y(g_AngleY + tempo*0.1)`** faz a esfera **girar em torno do próprio eixo vertical**. O ângulo cresce com o tempo, por isso ela fica girando sozinha. O `g_AngleY` é um ajuste manual que você controla pelo teclado.
+2. **`Rotate_X(0.2)`** e **`Rotate_Z(0.6)`** são ângulos fixos que **inclinam esse eixo de giro**, como a inclinação do eixo da Terra. Sem eles a esfera giraria em pé. Com eles, gira em torno de um eixo torto.
+3. **`Translate`** vem por último e só leva a esfera já orientada até a posição final.
+
+Dois detalhes:
+
+- **A ordem importa.** Todas as rotações acontecem com a esfera ainda centrada na origem, então ela gira **em torno do próprio centro**. Se a translação viesse antes (mais à direita no produto), a esfera primeiro iria para (−1,0,0) e depois giraria em torno da origem do mundo. Aí ela **orbitaria** a origem em vez de girar no lugar.
+- **A rotação só aparece por causa da textura.** Uma esfera parece igual em qualquer orientação. O que mostra o giro são os tijolos, porque a textura usa `position_model`, ou seja, fica presa às coordenadas do objeto.
+
+As duas linhas seguintes não criam matrizes. `glUniformMatrix4fv` envia a `model` para o vertex shader, e `glUniform1i(..., SPHERE)` avisa o fragment shader que o objeto é a esfera, para ele escolher a projeção esférica da textura. Só então `DrawVirtualObject` desenha os triângulos.
+
+===== USUÁRIO [2026-11-01 12:38:33] =====
+Entao a translate, rotate_z e rotate_x acontecem so no posicionamento inicial da esfera, mas a Y repete?
+
+----- CLAUDE [2026-11-01 12:38:43] -----
+A ideia está quase certa, mas não é bem assim. **As quatro matrizes são recalculadas e aplicadas em todo quadro.** O código não posiciona a esfera uma vez e depois só gira em Y.
+
+Esse trecho fica dentro do `while` do loop de renderização. A cada quadro, que são dezenas de vezes por segundo:
+
+1. A `model` é montada **do zero** com as quatro matrizes.
+2. Ela é enviada para a GPU.
+3. Todos os vértices da esfera são transformados de novo, a partir das coordenadas originais do `.obj`.
+
+A diferença é que **só o ângulo do `Rotate_Y` muda entre um quadro e outro**:
+
+| Matriz | Valor a cada quadro |
+|---|---|
+| `Translate(-1,0,0)` | sempre igual |
+| `Rotate_Z(0.6)` | sempre igual |
+| `Rotate_X(0.2)` | sempre igual |
+| `Rotate_Y(g_AngleY + t*0.1)` | ângulo diferente, porque `t` cresce |
+
+Então o efeito *parece* um posicionamento inicial fixo com um giro contínuo. Por baixo, porém, tudo é refeito a cada quadro.
+
+Outro ponto: a rotação **não acumula**. O código não faz "gira mais um pouquinho em relação ao quadro anterior". O ângulo é calculado direto a partir do tempo total desde o início do programa. No segundo 10, por exemplo, o ângulo é `g_AngleY + 1.0` rad, seja qual for o ângulo do quadro anterior.
+
+Isso vai importar no Hasty Wings. O pássaro vai precisar de uma posição que muda conforme a física (velocidade, gravidade), e aí você guarda essa posição numa variável e atualiza ela todo quadro. A `model` continua sendo montada do zero a cada quadro, só que com `Matrix_Translate(passaro.x, passaro.y, passaro.z)` em vez de valores fixos.
+
+===== USUÁRIO [2026-11-01 12:41:16] =====
+<ide_opened_file>The user opened the file /home/rafastephanou/Projects/ProjetoCG/TrabalhoCG/src/main.cpp in the IDE. This may or may not be related to the current task.</ide_opened_file>
+O mapeamento de texturas ocorre so na inicializacao do programa ou ele repete por frame?
+
+----- CLAUDE [2026-11-01 12:41:28] -----
+Depende da parte. O carregamento da imagem acontece **uma vez só**, mas o mapeamento em si se repete **em todo quadro, para cada fragmento**.
+
+## Uma vez, na inicialização
+
+`LoadTextureImage()` ([main.cpp:302-303](src/main.cpp#L302-L303)) é chamada antes do loop e faz três coisas:
+- lê o `.jpg` do disco (`stbi_load`);
+- envia a imagem para a memória da GPU (`glTexImage2D`);
+- gera os mipmaps (`glGenerateMipmap`) e configura o sampler (wrapping e filtragem).
+
+Daí em diante a imagem fica guardada na GPU e não é mais lida do disco.
+
+As coordenadas `(u,v)` **do plano** também são enviadas uma vez só. Elas vêm do `.obj` e vão para um VBO em `BuildTrianglesAndAddToVirtualScene()`, junto com as posições e as normais.
+
+## Todo quadro, em cada fragmento
+
+O fragment shader roda **para cada pixel coberto por um objeto, em todo quadro**. Cada execução faz:
+
+1. **Calcula `(u,v)`**: a projeção esférica (esfera) ou planar (coelho) a partir de `position_model`. No plano, ele só lê o `texcoords` interpolado.
+2. **Amostra a textura**: `texture(TextureImage0, vec2(U,V))` busca a cor na imagem. O filtro trilinear escolhe o nível de mipmap e mistura os texels vizinhos.
+3. **Usa essa cor como `Kd`** na equação de Lambert.
+
+Ou seja, a função de parametrização φ(p) = (u,v) da Aula 20 é calculada de novo milhões de vezes por segundo. Isso é barato para a GPU, que roda milhares de fragmentos em paralelo.
+
+## Por que precisa refazer
+
+O nível de mipmap depende do tamanho que o objeto ocupa na tela. Quando você aproxima ou afasta a câmera, a amostragem muda, então ela precisa ser refeita a cada quadro. Já as coordenadas `(u,v)` de um ponto da esfera nunca mudam, porque são calculadas em coordenadas do modelo. Dava para calcular uma vez e guardar num VBO, como o plano faz. O código calcula no shader porque é o exercício do laboratório: implementar as projeções esférica e planar.
+
+===== USUÁRIO [2026-11-01 13:41:48] =====
+E se acontece uma mudanca de textura em tempo real?
+
+----- CLAUDE [2026-11-01 13:42:07] -----
+Depende do tipo de mudança. Há quatro jeitos comuns, do mais simples ao mais caro:
+
+## 1. Trocar entre texturas já carregadas (o mais comum)
+
+Você carrega todas as imagens na inicialização, cada uma numa *texture unit* (`TextureImage0`, `1`, `2`...), e escolhe qual usar no momento de desenhar. No projeto isso já acontece por objeto: o shader usa `TextureImage0` para esfera e coelho e `TextureImage1` para o plano, decidindo pelo `object_id`.
+
+Para trocar em tempo real, basta mandar um uniform novo todo quadro:
+
+```cpp
+// main.cpp, no loop
+glUniform1i(g_skin_uniform, jogador_pegou_powerup ? 1 : 0);
+```
+
+```glsl
+// fragment shader
+Kd0 = (skin == 1) ? texture(TextureImage2, uv).rgb
+                  : texture(TextureImage0, uv).rgb;
+```
+
+Não há custo de upload, porque as imagens já estão na GPU. Trocar é só mudar um número.
+
+## 2. Mexer nas coordenadas `(u,v)` (textura "animada")
+
+A imagem continua a mesma, e o que muda é **onde** ela é amostrada. Por exemplo, mandar o tempo como uniform e deslocar o `u`:
+
+```glsl
+Kd0 = texture(TextureImage1, vec2(U + tempo*0.1, V)).rgb;
+```
+
+Com isso a textura "escorre" pela superfície, o que serve para água, nuvens ou lava. Para repetir sem cortes, o wrapping precisa ser `GL_REPEAT`. Hoje está `CLAMP_TO_EDGE` ([main.cpp:497-498](src/main.cpp#L497-L498)), e com ele a borda da imagem ficaria esticada.
+
+## 3. Misturar texturas ou mudar a cor por código
+
+Dá para combinar duas texturas com `mix(texA, texB, t)`, com o `t` vindo de um uniform. Também dá para multiplicar a cor por um fator. A imagem continua a mesma, e o shader decide a cor final.
+
+## 4. Alterar os pixels da imagem na GPU (o mais caro)
+
+Se o conteúdo da imagem realmente muda, como num vídeo ou numa imagem gerada pela CPU a cada quadro, você reenvia os pixels com `glTexSubImage2D`. Funciona, mas copiar dados da CPU para a GPU todo quadro é lento. Por isso só vale quando não há alternativa, e é raro num jogo como o de vocês.
+
+---
+
+**No Hasty Wings**, a mecânica do pôr do sol se encaixa bem nos itens 2 e 3. Você manda um uniform `hora_do_dia` (0 = meio-dia, 1 = noite) e usa ele para:
+- misturar a cor do céu de azul para laranja e depois escuro (`mix`);
+- mudar a cor e a direção da luz `l`, que hoje é fixa em `(1,1,0)` no shader.
+
+Assim o cenário inteiro escurece conforme o jogador perde velocidade, sem carregar nenhuma imagem nova.
+
+===== USUÁRIO [2026-11-01 13:43:04] =====
+o que faz o lad shaers?
+
+----- CLAUDE [2026-11-01 13:43:26] -----
+Imagino que a pergunta seja sobre a `LoadShadersFromFiles()` ([main.cpp:560](src/main.cpp#L560)). Ela **pega os dois arquivos `.glsl`, compila e monta com eles o "programa de GPU"**, que é o que roda nas etapas programáveis do pipeline (Vertex Shading e Fragment Shading, Aula 03).
+
+## Passo a passo
+
+**1. Lê e compila cada shader** (`LoadShader_Vertex` / `LoadShader_Fragment` → `LoadShader`, [main.cpp:925](src/main.cpp#L925))
+- Lê o arquivo de texto (`../../src/shader_vertex.glsl`, por exemplo).
+- `glShaderSource` entrega o código-fonte ao driver da placa de vídeo.
+- `glCompileShader` compila o GLSL para o código de máquina da **sua** GPU. Por isso os shaders são compilados enquanto o programa roda, e não junto com o C++: cada placa tem um código de máquina diferente.
+- Se houver erro de sintaxe no GLSL, o log aparece no terminal (`ERROR: OpenGL compilation of ... failed`).
+
+**2. Junta os dois num programa** (`CreateGpuProgram`, [main.cpp:995](src/main.cpp#L995))
+- `glAttachShader` + `glLinkProgram` ligam o vertex shader ao fragment shader. É no *link* que o OpenGL confere se cada `out` do vertex shader (`position_world`, `normal`, `texcoords`...) tem um `in` com o mesmo nome no fragment shader.
+- O ID do programa fica guardado em `g_GpuProgramID`, e o loop principal usa ele com `glUseProgram(g_GpuProgramID)`.
+
+**3. Pega os "endereços" dos uniforms**
+```cpp
+g_model_uniform = glGetUniformLocation(g_GpuProgramID, "model");
+```
+Isso busca onde está a variável `uniform mat4 model` dentro do programa compilado. Esses endereços são os que o loop usa depois com `glUniformMatrix4fv(g_model_uniform, ...)` para mandar as matrizes todo quadro. É a ponte entre as variáveis do C++ e as do GLSL.
+
+**4. Liga os samplers às texture units**
+```cpp
+glUniform1i(glGetUniformLocation(g_GpuProgramID, "TextureImage0"), 0);
+```
+Isso diz que `TextureImage0` no shader lê da texture unit 0, onde `LoadTextureImage` colocou a primeira imagem (tijolos). `TextureImage1` lê da unit 1 (pedras), e assim por diante.
+
+## Quando é chamada
+
+- **Uma vez na inicialização** ([main.cpp:299](src/main.cpp#L299)).
+- **Toda vez que você aperta R** ([main.cpp:1280](src/main.cpp#L1280)). Por isso ela começa apagando o programa anterior (`glDeleteProgram`). Dá para editar o `shader_fragment.glsl`, salvar, apertar R e ver a mudança na hora, sem recompilar nem reiniciar o programa. Isso ajuda muito quando vocês forem ajustar a iluminação ou o céu do Hasty Wings.
+
+Se você adicionar um uniform novo, como o `hora_do_dia` do pôr do sol, precisa acrescentar o `glGetUniformLocation` correspondente nessa função.
+
+===== USUÁRIO [2026-11-01 13:45:46] =====
+Identifique e explique como sao implementadas todas as etapas do pipeline grafico: Model and view, vertex shading, projection, clipping, screen mapping, fragment generation, fragment shading, visibility no codigo
+
+----- CLAUDE [2026-11-01 13:46:20] -----
+Antes de tudo: das oito etapas, só **três são programadas por vocês**. Vertex shading e fragment shading ficam nos shaders, e model & view no C++. As outras são **fixas na GPU**: o código só liga, desliga ou configura essas etapas, e o hardware faz o trabalho.
+
+| Etapa | Quem executa | Onde está no código |
+|---|---|---|
+| Model & View | C++ monta as matrizes, GPU aplica | [main.cpp:361-436](src/main.cpp#L361-L436), [matrices.h:224](include/matrices.h#L224) |
+| Vertex Shading | **programável** | [shader_vertex.glsl](src/shader_vertex.glsl) |
+| Projection | C++ monta a matriz, GPU aplica | [main.cpp:376-403](src/main.cpp#L376-L403), [matrices.h:256-321](include/matrices.h#L256-L321) |
+| Clipping | **fixa** (GPU) | definido indiretamente pelo frustum e pelo `−M·P` |
+| Screen Mapping | **fixa**, configurada | `glViewport` em [main.cpp:1053](src/main.cpp#L1053) |
+| Fragment Generation | **fixa** | `glDrawElements` + variáveis `out`/`in` + culling |
+| Fragment Shading | **programável** | [shader_fragment.glsl](src/shader_fragment.glsl) |
+| Visibility | **fixa**, configurada | `glEnable(GL_DEPTH_TEST)` + `glClear` |
+
+---
+
+## 1. Model & View
+
+**Model** (coordenadas do modelo → mundo): para cada objeto, o loop monta uma matriz com translações e rotações e envia para a GPU antes de desenhar:
+```cpp
+model = Matrix_Translate(-1,0,0) * Matrix_Rotate_Z(0.6) * Matrix_Rotate_X(0.2) * Matrix_Rotate_Y(...);
+glUniformMatrix4fv(g_model_uniform, 1, GL_FALSE, glm::value_ptr(model));
+```
+
+**View** (mundo → câmera): a posição `c` da câmera sai de coordenadas esféricas (mouse), e `Matrix_Camera_View(c, view, up)` monta a base `u, v, w`:
+- `w = −view`, `u = up × w`, `v = w × u`
+- a matriz é `[u; v; w]` com a translação `−u·(c−o)`, `−v·(c−o)`, `−w·(c−o)`
+
+A `view` é enviada **uma vez por quadro**, porque é igual para todos os objetos. A `model` é enviada **uma vez por objeto**.
+
+## 2. Vertex Shading
+
+[shader_vertex.glsl](src/shader_vertex.glsl) roda **uma vez para cada vértice** de cada objeto desenhado:
+
+```glsl
+gl_Position    = projection * view * model * model_coefficients;  // para o clipping
+position_world = model * model_coefficients;                      // para a iluminação
+position_model = model_coefficients;                              // para a textura (esfera/coelho)
+normal         = inverse(transpose(model)) * normal_coefficients; // normal no mundo
+normal.w = 0.0;
+texcoords      = texture_coefficients;                            // (u,v) do .obj
+```
+
+Os dados de entrada (`layout(location=0,1,2)`) são os VBOs que `BuildTrianglesAndAddToVirtualScene()` enviou para a GPU na inicialização. Aqui é **só transformação**: nenhuma cor é calculada. A iluminação ficou toda no fragment shader, e é isso que faz dele um Phong shading.
+
+## 3. Projection
+
+No C++, conforme a tecla P/O:
+- **Perspectiva**: `Matrix_Perspective(π/3, aspect, −0.1, −10)` retorna `−M·P`. A matriz `P` coloca `z` em `w` (a última linha é `0 0 1 0`), e `M` é a ortográfica que leva o volume de visão para o cubo `[−1,1]³`.
+- **Ortográfica**: `Matrix_Orthographic(l, r, b, t, n, f)`, com `t` proporcional à distância da câmera para simular zoom.
+
+A matriz é aplicada no vertex shader, na mesma linha do `gl_Position`. O resultado são as **coordenadas de recorte (clip coordinates)**, ainda **antes** da divisão por `w`.
+
+## 4. Clipping
+
+Nenhuma linha de código faz o clipping. A GPU faz isso automaticamente com o `gl_Position`: descarta, ou recorta, tudo que estiver fora de
+```
+−w ≤ x ≤ w,   −w ≤ y ≤ w,   −w ≤ z ≤ w
+```
+O código controla o clipping de forma **indireta**:
+- `nearplane`/`farplane` e o FOV definem o frustum. Algo mais perto que 0.1 ou mais longe que 10 unidades some.
+- O `−M·P` existe justamente para esse teste funcionar, porque ele só vale com `w > 0` (o comentário em [matrices.h:301-320](include/matrices.h#L301-L320) explica).
+
+Logo depois, a GPU faz a **divisão perspectiva** (`x/w, y/w, z/w`) e chega às **NDC**.
+
+## 5. Screen Mapping
+
+A GPU leva as NDC `[−1,1]` para pixels da janela com a transformação de **viewport**, que o código configura:
+```cpp
+void FramebufferSizeCallback(GLFWwindow* window, int width, int height) {
+    glViewport(0, 0, width, height);
+    g_ScreenRatio = (float)width / height;
+}
+```
+Essa função é chamada na inicialização e sempre que a janela muda de tamanho. O `z` das NDC também é mapeado, para `[0,1]`, e esse valor é o que vai para o Z-buffer.
+
+## 6. Fragment Generation (rasterização)
+
+Começa com `glDrawElements(...)` dentro de `DrawVirtualObject()` ([main.cpp:545](src/main.cpp#L545)). A GPU monta os triângulos a partir dos índices e:
+
+1. **Descarta triângulos de costas (backface culling)**, que o código liga em [main.cpp:331-333](src/main.cpp#L331-L333):
+   ```cpp
+   glEnable(GL_CULL_FACE); glCullFace(GL_BACK); glFrontFace(GL_CCW);
+   ```
+   Um triângulo cujos vértices aparecem em sentido horário na tela está de costas e nem gera fragmentos.
+2. **Descobre quais pixels cada triângulo cobre**: cada um vira um fragmento.
+3. **Interpola os atributos**: cada variável `out` do vertex shader (`position_world`, `position_model`, `normal`, `texcoords`) é interpolada entre os 3 vértices, com correção de perspectiva, e chega como `in` no fragment shader.
+
+Esse passo 3 é a ligação entre os dois shaders, e o comentário no topo do [shader_vertex.glsl:14-17](src/shader_vertex.glsl#L14-L17) chama atenção para ele.
+
+## 7. Fragment Shading
+
+[shader_fragment.glsl](src/shader_fragment.glsl) roda **uma vez por fragmento** e calcula a cor:
+
+1. **Posição da câmera**: `inverse(view) * (0,0,0,1)`.
+2. **Coordenadas de textura** conforme `object_id`: projeção esférica (esfera), planar XY com a AABB (coelho) ou `texcoords` do `.obj` (plano).
+3. **Amostragem**: `Kd0 = texture(TextureImageN, vec2(U,V)).rgb`.
+4. **Iluminação de Lambert** com um termo ambiente: `color = Kd0 * (max(0, n·l) + 0.01)`.
+5. **Correção gamma**: `pow(color, 1/2.2)`.
+
+A saída é `out vec4 color`.
+
+## 8. Visibility (Z-buffer)
+
+Também é fixa na GPU. O código só liga e limpa:
+```cpp
+glEnable(GL_DEPTH_TEST);                               // main.cpp:328, uma vez
+glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);    // main.cpp:350, todo quadro
+```
+Para cada fragmento, a GPU compara a profundidade dele com a que já está no Z-buffer naquele pixel. Se ele estiver mais perto, a cor vai para o framebuffer e o Z-buffer é atualizado. Se não, ele é descartado. Por isso a **ordem dos `DrawVirtualObject` não importa** para objetos opacos: o coelho atrás da esfera fica escondido mesmo que seja desenhado depois.
+
+O `glClear` do depth buffer em todo quadro é essencial. Sem ele, as profundidades do quadro anterior continuariam no buffer e bloqueariam o novo desenho.
+
+No fim, `glfwSwapBuffers()` mostra o framebuffer pronto na tela.
+
+---
+
+**Resumo do fluxo de um vértice até o pixel:**
+
+```
+model_coefficients (modelo)
+  ─ model ─────────▶ mundo                    ┐
+  ─ view ──────────▶ câmera                   │ vertex shader
+  ─ projection ────▶ clip coords (gl_Position)┘
+  ─ clipping ──────▶ descarta o que está fora do frustum      ┐
+  ─ ÷ w ───────────▶ NDC [−1,1]³                              │
+  ─ glViewport ────▶ pixels da janela + z ∈ [0,1]             │ GPU (fixo)
+  ─ culling + rasterização + interpolação ─▶ fragmentos       ┘
+  ─ fragment shader ─▶ cor (textura + Lambert + gamma)          programável
+  ─ depth test ────▶ framebuffer                                GPU (fixo)
+```
+
+===== USUÁRIO [2026-11-01 14:11:14] =====
+Qual tipo de shading esse projeto usa?
+
+----- CLAUDE [2026-11-01 14:11:29] -----
+O projeto usa **Phong shading**, com um detalhe: o modelo de iluminação dele ainda é **só Lambert**, não o Phong completo. São duas coisas diferentes, e as aulas 17/18 também separam as duas.
+
+## Interpolação de shading: Phong
+
+Existem três formas clássicas de decidir **onde** a iluminação é calculada:
+
+| Tipo | Onde a iluminação é calculada | O que é interpolado |
+|---|---|---|
+| Flat | uma vez por triângulo | nada (o triângulo inteiro tem uma cor só) |
+| Gouraud | em cada **vértice** (vertex shader) | a **cor** |
+| **Phong** | em cada **fragmento** (fragment shader) | a **normal** |
+
+O projeto é Phong porque:
+- o vertex shader **não calcula cor nenhuma**, só passa a normal adiante: `normal = inverse(transpose(model)) * normal_coefficients;`
+- o rasterizador interpola essa normal entre os vértices;
+- o fragment shader normaliza de novo a normal interpolada (`n = normalize(normal)`) e calcula a iluminação **por pixel**.
+
+Um ponto que costuma confundir: `ComputeNormals()` tem um comentário falando em *"método proposto por Gouraud"*. Isso se refere só a **como calcular a normal de cada vértice**, pela média das normais das faces vizinhas. **Não** é Gouraud shading. Tanto o Gouraud quanto o Phong shading precisam dessas normais por vértice. O que muda entre eles é se a interpolação acontece **antes** ou **depois** de calcular a iluminação.
+
+## Modelo de iluminação: Lambert + ambiente
+
+A equação que o fragment shader calcula é:
+
+```glsl
+color.rgb = Kd0 * (max(0, dot(n, l)) + 0.01);
+```
+
+Comparando com a equação de Phong dos slides:
+
+$$
+\text{cor}_p = \underbrace{k_d\, I \max(0, n\cdot l)}_{\text{difuso (Lambert)}} + \underbrace{k_a I_a}_{\text{ambiente}} + \underbrace{k_s\, I \max(0, r\cdot v)^q}_{\text{especular}}
+$$
+
+- **Difuso**: ✅ implementado, com `Kd` vindo da textura e `I = 1`.
+- **Ambiente**: ✅ simplificado. É o `+ 0.01`, multiplicado por `Kd0`, ou seja, `ka = Kd` e `Ia = 0.01`.
+- **Especular**: ❌ não implementado. O shader já calcula `v` (o vetor até a câmera), mas não usa.
+
+## Por que importa para o trabalho
+
+Com só o termo difuso, Gouraud e Phong shading ficam quase iguais visualmente. A diferença aparece com o **termo especular**: no Gouraud o brilho fica borrado ou some nos triângulos grandes, e no Phong ele fica nítido. Se o enunciado pedir os dois tipos de shading e os dois modelos de iluminação (o do INF01047 costuma pedir), vocês precisam:
+1. adicionar o termo especular (Phong ou Blinn-Phong) no fragment shader;
+2. ter pelo menos um objeto com **Gouraud shading**, ou seja, iluminação calculada no vertex shader e cor interpolada.
+
+===== USUÁRIO [2026-11-01 14:13:13] =====
+Nos fazemos projecao ortografica ou perspectiva?
+
+----- CLAUDE [2026-11-01 14:13:24] -----
+Por padrão o projeto usa **perspectiva**, mas implementa as duas e você troca enquanto o programa roda.
+
+**Padrão:** [main.cpp:211](src/main.cpp#L211)
+```cpp
+bool g_UsePerspectiveProjection = true;
+```
+
+**Troca pelo teclado:** no `KeyCallback` ([main.cpp:1264-1270](src/main.cpp#L1264-L1270)), **P** liga a perspectiva e **O** liga a ortográfica.
+
+**Escolha no loop** ([main.cpp:384-403](src/main.cpp#L384-L403)), refeita em todo quadro:
+```cpp
+if (g_UsePerspectiveProjection)
+    projection = Matrix_Perspective(field_of_view, g_ScreenRatio, nearplane, farplane);
+else
+    projection = Matrix_Orthographic(l, r, b, t, nearplane, farplane);
+```
+
+O texto no canto da tela (`TextRendering_ShowProjection`) mostra qual está ativa.
+
+**Diferença visual (Aula 09):**
+- **Perspectiva**: objetos mais longe ficam menores e retas paralelas convergem. É como o olho e uma câmera real enxergam.
+- **Ortográfica**: o tamanho não muda com a distância e o paralelismo se mantém. Para não ficar sem zoom, o código faz o `t` crescer com `g_CameraDistance`, e a rolagem do mouse "aproxima" mesmo assim.
+
+**No Hasty Wings**, o jogo deve usar **perspectiva**. Ela passa a sensação de velocidade, com o terreno vindo na direção da câmera e as rampas crescendo ao se aproximar, que é o que o vídeo de referência mostra. Vocês podem manter a ortográfica pela tecla O se o enunciado pedir as duas projeções. Se não pedir, dá para deixar a perspectiva fixa.

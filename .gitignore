@@ -1,2 +1,4 @@
 bin
 build
+# Claude Code (config pessoal)
+.claude/settings.local.json
