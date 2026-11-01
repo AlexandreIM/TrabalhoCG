@@ -1248,3 +1248,744 @@ Situação atual dos arquivos:
 | `src/terrain.cpp` | novo, ainda não rastreado pelo git |
 
 Se você commitar agora pelo Source Control, entram só os três arquivos do staging. O terreno e a física ficam de fora. Quer que eu faça os dois commits por aqui (um para o registro das conversas, outro para o terreno e a física) ou prefere fazer você?
+
+===== USUÁRIO [2026-11-01 18:29:08] =====
+<ide_opened_file>The user opened the file /home/rafastephanou/Projects/ProjetoCG/TrabalhoCG/prompt_history.txt in the IDE. This may or may not be related to the current task.</ide_opened_file>
+A gravidade da velocidade eh a mesma da queda?
+
+----- CLAUDE [2026-11-01 18:29:23] -----
+Parte da mesma constante, `PLAYER_GRAVITY = 9.8` ([main.cpp:238](src/main.cpp#L238)), mas a intensidade efetiva é diferente no chão e no ar:
+
+| Situação | Aceleração | Valor |
+|---|---|---|
+| **No chão, com dive** | `G · n.x` ([main.cpp:577](src/main.cpp#L577)) | 9.8 · sen θ, ao longo da rampa |
+| **No chão, sem dive** | nenhuma (volta para a velocidade base) | 0 |
+| **No ar, planando** | `G · 0.35` ([main.cpp:554](src/main.cpp#L554)) | 3.43 para baixo, com queda limitada a 4 u/s |
+| **No ar, com dive** | `G · 2.5` | 24.5 para baixo |
+
+**No chão** a gravidade é a física real. A bola não cai, então só a componente da gravidade paralela à rampa muda a velocidade. Como a normal é `n = (−slope, 1)/len`, `n.x` vale −sen θ, e a aceleração fica `g·sen θ`: zero no plano e 9.8 numa parede vertical. A outra componente, perpendicular, é anulada pelo chão.
+
+**No ar** os multiplicadores são escolhas de jogabilidade, não física:
+- **Planando (0.35):** a gravidade fica bem mais fraca, então a bola cai devagar e dá para ver o voo.
+- **Dive (2.5):** a gravidade fica bem mais forte, então a bola mergulha rápido e chega no chão com mais velocidade.
+
+Se quiser que a queda use a gravidade "verdadeira", é só deixar `PLAYER_DIVE_GRAVITY_MULT` em 1.0. O mergulho fica mais lento e menos responsivo.
+
+===== USUÁRIO [2026-11-01 18:30:17] =====
+troque a planando para 0.65 e no ar com dive para 1.5
+
+----- CLAUDE [2026-11-01 18:30:35] -----
+Mudei os dois valores em [main.cpp:242-243](src/main.cpp#L242-L243). O projeto compilou sem erros e o binário `bin/Linux/main` foi atualizado, mas eu não abri o jogo para testar.
+
+| Situação | Antes | Agora |
+|---|---|---|
+| Planando | 0.35 → 3.43 u/s² | **0.65 → 6.37 u/s²** |
+| Dive no ar | 2.5 → 24.5 u/s² | **1.5 → 14.7 u/s²** |
+
+O que deve mudar no jogo:
+- **Voos mais curtos:** planando, a bola perde altura quase duas vezes mais rápido. Ela ainda não cai mais rápido que 4 u/s (`PLAYER_GLIDE_MAX_FALL`), mas chega nesse limite mais cedo.
+- **Dive mais suave:** o mergulho fica menos brusco, e a bola chega no chão com um pouco menos de velocidade.
+- **Diferença menor entre os dois modos:** antes o dive era cerca de 7× mais forte que planar, agora é cerca de 2,3×.
+
+===== USUÁRIO [2026-11-01 18:32:46] =====
+Eu quero que ao mover o mouse sem botao direito pressioando mexemos a camera, e com botao direito, travamos a camera em direcao a bola e mexemos a direcao em que a bola anda. Como voce faria isso?
+
+----- CLAUDE [2026-11-01 18:33:29] -----
+Dá para fazer, mas a mudança vai além da câmera. Hoje o jogo é praticamente 2D: a bola só anda em x, e o terreno é um perfil de Bézier esticado em z, com apenas 20 unidades de largura. Deixar o jogador escolher a direção da bola exige mexer em três partes.
+
+## 1. Câmera (fácil)
+
+Hoje a câmera fica numa órbita em volta da bola, calculada em [main.cpp:420-422](src/main.cpp#L420-L422) a partir de θ, φ e da distância, e só gira com o botão direito pressionado ([main.cpp:1403](src/main.cpp#L1403)).
+
+- **Sem botão direito:** o movimento do mouse altera θ e φ, como já acontece hoje, só que sem precisar segurar botão. Para isso o cursor precisa ser "capturado" com `glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED)`. Sem isso, o mouse bate na borda da janela e a câmera para de girar. O ESC solta o cursor.
+- **Com botão direito:** o movimento horizontal do mouse passa a girar o **rumo ψ** da bola, e não a câmera. A câmera se posiciona atrás da bola calculando θ a partir de ψ. Com direção `d = (cos ψ, 0, −sin ψ)`, ficar atrás da bola significa `θ = ψ − π/2`. Para não dar um salto ao apertar o botão, θ se aproxima desse valor aos poucos, com a mesma interpolação exponencial já usada no retorno à velocidade base.
+
+## 2. Física (média)
+
+A ideia é manter a física atual, só que medida **na direção do rumo**:
+
+- A velocidade continua sendo um escalar que nunca fica abaixo do mínimo, mas agora se move ao longo de `d`.
+- A inclinação usada pela gravidade passa a ser a inclinação na direção do movimento: `∇h · d`. Andando em x ela é igual à de hoje. Andando em z, num terreno que não varia em z, ela vale 0, ou seja, terreno plano.
+- No ar entra uma componente `VZ` constante, e a rotação da esfera passa a usar o eixo `cross(up, d)`.
+- A busca do ponto de contato, que hoje é feita em 1D ao longo de x, passa a ser feita ao longo do rumo.
+
+## 3. Terreno (o ponto principal)
+
+Sem mudar o terreno, girar a bola não serve para quase nada, por dois motivos:
+- **Ele acaba:** com 20 unidades de largura em z, em poucos segundos a bola cai pela borda. Os chunks precisariam ser gerados também em z, numa grade 2D de chunks em vez de uma fila.
+- **Ele é igual em z:** andar de lado é sempre plano, então não há motivo para virar.
+
+O caminho mais natural para a disciplina é trocar o perfil esticado por uma **superfície de Bézier bicúbica** (produto tensorial, da Aula 16). Ela é construída com uma grade de pontos de controle sorteados pelo mesmo hash, agora usando `(i, j)`. O terreno passa a ter morros em todas as direções, e virar passa a fazer sentido: dá para escolher a melhor rampa. A altura e o gradiente continuam com fórmulas fechadas, como hoje.
+
+## Decisões que são suas
+
+1. **Até onde dá para virar:** liberdade total (360°), ou um limite como ±60° em torno de +x, para manter o "sempre para frente" do SPEC?
+2. **Terreno:** fazer só a câmera e o rumo, com a bola presa numa faixa em z, ou já partir para a superfície de Bézier 2D?
+
+Minha recomendação é limitar o giro a cerca de ±60° e fazer a superfície bicúbica. Isso mantém a ideia de corrida do SPEC e faz a direção influenciar o jogo de verdade. Quer que eu siga assim?
+
+===== USUÁRIO [2026-11-01 18:36:03] =====
+Limite o grau e implemente a superficie bicubica
+
+----- CLAUDE [2026-11-01 18:43:06] -----
+Implementei o terreno de Bézier bicúbico e os novos controles de mouse e câmera. Compila sem erros e roda a cerca de 140 fps. Abri o jogo por 7 segundos sem mexer no mouse e tirei um print: aparece a câmera atrás da bola, morros variando em x e em z, e a neblina escondendo a borda. Os controles com o mouse eu não usei de verdade; eles foram verificados pela simulação descrita no fim.
+
+## Controles
+
+| Ação | Efeito |
+|---|---|
+| Mover o mouse | Gira a câmera em volta da bola |
+| Botão direito + mover | A câmera vai aos poucos para trás da bola, e o movimento horizontal muda o rumo |
+| Botão esquerdo | Dive, como antes |
+| ESC | Fecha o jogo |
+
+O cursor agora fica escondido e preso na janela; sem isso a câmera pararia quando o mouse chegasse na borda. Por isso o ESC é o jeito de sair. O rumo vai até ±60° e aparece no HUD como `Heading`.
+
+## Terreno ([terrain.cpp](src/terrain.cpp))
+
+- **Superfície bicúbica:** cada patch de 8×8 tem uma grade 4×4 de pontos de controle, e a altura é `Σ Bₖ(u)·Bₗ(v)·Pₖₗ`, que é o produto tensorial da Aula 16.
+- **Pontos de controle:** cada canto do patch preenche um bloco 2×2 da grade com a sua altura. É a mesma ideia de `P1.y = P0.y` da curva, agora nas duas direções, e garante continuidade C1 entre patches.
+- **Alturas:** linhas de x par continuam sendo topos e linhas ímpares continuam sendo vales, mas a altura de cada um muda ao longo de z. Assim existem caminhos mais baixos e mais altos para escolher.
+- **Chunks:** agora formam uma grade 2D de 10×11 chunks com buffer circular nas duas direções.
+- **Gradiente:** `TerrainSlope` foi substituída por `TerrainGradient`, que devolve ∂h/∂x e ∂h/∂z. As normais passaram a ser `(−hx, 1, −hz)`.
+
+## Física ([main.cpp](src/main.cpp))
+
+- **Mesmas regras, agora no plano do rumo:** a física continua a mesma, só que medida no plano vertical da direção `d`. A inclinação usada é `∇h · d`.
+- **Ponto de contato em 3D:** a busca por amostragem em 1D foi trocada por uma iteração de ponto fixo, que procura o ponto onde `c − S(p)` fica paralelo à normal.
+- **Rumo no ar:** dá para mudar o rumo durante o voo, como um pássaro.
+- **Rolamento:** a esfera gira em torno do eixo perpendicular ao rumo e para de girar no ar.
+
+## Outras mudanças
+
+- **Câmera:** começa atrás da bola, a 10 unidades, e nunca fica abaixo do terreno.
+- **Neblina:** o intervalo mudou de 40–90 para 35–80, para esconder a borda da área de chunks quando você olha para os lados.
+
+## Verificação
+
+Rodei uma simulação que usa as funções reais extraídas do `main.cpp`:
+- **Distância até o terreno:** a diferença para uma busca por força bruta foi de no máximo 0,00013, e a bola entra no chão no máximo 0,00004.
+- **Continuidade nas bordas dos patches:** o salto de altura é zero e o de gradiente é de no máximo 0,0008.
+- **Simulação de 5 minutos:** sem dive o resultado é igual ao de antes (x = 1370). Com rumo oscilando e dive nas descidas, a bola faz 90 voos e se afasta até 44 unidades em z.
+
+===== USUÁRIO [2026-11-01 18:45:47] =====
+Eu quero que voce substitua nossa atual constante de velocidade por um limite inferior de velocidade da gravidade. ALem disso, quero que inverta a funcionalidade de clicar o botao direito e nao clicar.
+
+----- CLAUDE [2026-11-01 18:48:15] -----
+Fiz as duas mudanças. O código compila sem erros, e rodei de novo a simulação de 5 minutos com as funções reais do `main.cpp`. O jogo em si eu não abri com as mudanças novas, então os controles ainda não foram testados com o mouse.
+
+## 1. Velocidade: gravidade sempre, com piso 5
+
+A velocidade base fixa deixou de existir:
+- **Gravidade:** age o tempo todo, acelerando nas descidas e freando nas subidas.
+- **Piso:** `PLAYER_MIN_SPEED` agora vale **5** (antes era 1). A bola nunca fica mais lenta que isso, nem no chão, nem no ar, nem ao pousar.
+- **Dive no chão:** multiplica a gravidade por **2** (`PLAYER_DIVE_GROUND_GRAVITY_MULT`). Isso acelera mais nas descidas, mas também freia mais nas subidas, então soltar o dive na subida passa a ser uma escolha do jogador.
+- **Arrasto:** continua dissipando só o que passa de 5. Sem ele, o piso daria energia de graça a cada subida e a velocidade cresceria sem limite.
+- **Constantes removidas:** `PLAYER_BASE_SPEED` e `PLAYER_RETURN_RATE`.
+
+Pela simulação, o efeito é este:
+
+| Estratégia (5 min) | Distância | Voos | Velocidade máx. |
+|---|---|---|---|
+| Sem dive, reto | 1854 (antes 1370) | **33** (antes 0) | 10,4 |
+| Sem dive, virando | 1320 | 1 | 10,4 |
+| Dive nas descidas, virando | 1733 | 150 | 14,5 |
+
+**Repare na primeira linha:** antes, sem dive, a bola nunca decolava. Agora a própria gravidade dá embalo nas descidas, então ela decola sozinha em cerca de 1 a cada 3 morros. Se você quiser que só o dive faça decolar, dá para subir `PLAYER_TAKEOFF_MIN_EXCESS` (hoje 0,5).
+
+## 2. Botão direito invertido
+
+| Mouse | Efeito |
+|---|---|
+| **Só mover** | A câmera fica travada atrás da bola e o movimento horizontal muda o rumo |
+| **Botão direito + mover** | Câmera livre, orbitando a bola |
+
+Com isso, o modo padrão do jogo passa a ser dirigir a bola, e a câmera livre fica para quando você quiser olhar em volta.
+
+===== USUÁRIO [2026-11-01 18:49:31] =====
+Nao entendi o arrasto
+
+----- CLAUDE [2026-11-01 18:49:46] -----
+O arrasto é uma "força" que vai tirando aos poucos a velocidade que passa do piso de 5. Fica em [main.cpp](src/main.cpp), em `UpdatePlayerOnGround`:
+
+```cpp
+float drag_acceleration = -PLAYER_DRAG * (g_PlayerSpeed - PLAYER_MIN_SPEED);
+```
+
+## O que ele faz
+
+A desaceleração é proporcional ao **excesso** de velocidade, com `PLAYER_DRAG = 0.15`:
+
+| Velocidade | Excesso | Desaceleração do arrasto |
+|---|---|---|
+| 5 | 0 | 0, ou seja, no piso ele não age |
+| 7 | 2 | 0,3 u/s² |
+| 10 | 5 | 0,75 u/s² |
+| 15 | 10 | 1,5 u/s² |
+
+Num trecho plano, sem gravidade agindo, o excesso cai pela metade a cada **~4,6 s** (decaimento exponencial). Exemplo: chegou no plano a 15, depois de 4,6 s está a 10, e depois de mais 4,6 s está a 7,5.
+
+Comparado com a gravidade ele é fraco: numa rampa de 30°, a gravidade dá 4,9 u/s². Por isso o arrasto quase não aparece dentro de uma descida. Ele age ao longo do tempo, gastando aos poucos o embalo acumulado.
+
+## Por que ele existe
+
+O motivo é o **piso**. Sem arrasto, o piso cria energia do nada:
+
+1. Na **descida**, a gravidade acelera a bola, por exemplo de 5 para 9.
+2. Na **subida**, a gravidade deveria frear de volta, e em algum ponto a bola ficaria abaixo de 5. Mas o piso segura a velocidade em 5. A bola chega no topo sem ter "pago" a subida inteira.
+3. Na **próxima descida**, ela ganha velocidade de novo.
+
+Com física real, subir e descer um morro da mesma altura devolveria a mesma velocidade. Com o piso, cada morro deixa um pouquinho de lucro, e sem nada para compensar a velocidade cresceria sem limite ao longo do jogo. O arrasto é o "imposto" que equilibra esse lucro: quanto mais rápido, mais ele tira. Na simulação, a velocidade fica entre 5 e ~14 em vez de explodir.
+
+## Observação
+
+Não é arrasto do ar de verdade. O do ar real cresce com v² e puxa em direção a 0, não a 5. Este é uma simplificação de jogabilidade, feita para empurrar a velocidade de volta ao piso.
+
+Se quiser ajustar:
+- **0.15 → 0.05:** o embalo dura bem mais (meia-vida de ~14 s), e a velocidade máxima sobe.
+- **0.15 → 0.3:** o embalo some mais rápido (~2,3 s), e o jogo fica mais "controlado".
+
+===== USUÁRIO [2026-11-01 18:51:17] =====
+Quero que tu clipe o terreno, pra que seja so uma faixa retangular
+
+===== USUÁRIO [2026-11-01 18:51:57] =====
+Quero que tu clipe o terreno, pra que seja so uma faixa retangular. Caso a bola caia da faixa, reinicie a simulacao com um novo terreno
+
+----- CLAUDE [2026-11-01 18:54:31] -----
+O terreno agora é uma faixa retangular, e quando a bola cai dela o jogo reinicia com um terreno novo. Compila sem erros. Abri o jogo por alguns segundos e o print mostra a faixa terminando nas laterais, com o céu aparecendo dos dois lados. A queda e o reinício eu verifiquei pela simulação, não jogando.
+
+## Faixa ([terrain.cpp](src/terrain.cpp))
+
+- **Largura:** 32 unidades em z (de −16 a +16). Em x continua infinita.
+- **Chunks:** cada chunk de 16 em x cobre agora a largura toda, então a fila de chunks voltou a ser só em x. São 10 chunks, 4 deles atrás da bola.
+- **Terreno novo:** o hash das alturas recebe uma semente, e `Terrain_Reset(seed)` troca a semente e manda recalcular todos os chunks. A superfície continua sendo a mesma Bézier bicúbica.
+
+## Queda e reinício ([main.cpp](src/main.cpp))
+
+1. **Saindo pela borda:** se, ao andar no chão, o ponto de contato sair da faixa, a bola fica sem chão e cai com a velocidade que tinha.
+2. **Caindo:** ela só pousa se o ponto de contato estiver dentro da faixa e o centro estiver acima do terreno. Sem essa segunda condição, a bola que já passou da borda seria puxada de volta para cima dela.
+3. **Reinício:** quando a bola chega a y < −10, `ResetGame()` gera um terreno com a próxima semente e devolve a bola ao início. Ela volta na velocidade 5, com rumo 0° e a câmera atrás.
+
+## Simulação (5 minutos)
+
+| Estratégia | Reinícios | Problemas |
+|---|---|---|
+| Reto | 0 | nenhum |
+| Virando ±30° | 20 | nenhum |
+| Virado 60° para um lado | 71 | nenhum |
+
+Por "problemas" entendo a bola sendo puxada de volta para a borda, contato fora da faixa ou bola entrando no chão.
+
+## Ajustes possíveis
+
+- **Largura:** `TERRAIN_WIDTH` em [terrain.cpp](src/terrain.cpp). Com 32, virar 60° derruba a bola em cerca de 4 s.
+- **Tempo da queda:** `PLAYER_FALL_RESET_HEIGHT` em [main.cpp](src/main.cpp), hoje −10. Planando, a queda até lá leva cerca de 2,5 s; com dive é mais rápido.
+- **Visual da borda:** hoje a faixa termina numa superfície sem espessura. Se quiser, posso adicionar "paredes" laterais descendo da borda, para ela parecer um bloco de terra.
+
+===== USUÁRIO [2026-11-01 18:56:26] =====
+Como podemos aumentar a velocidade e tempo de voo ao mesmo tempo sem deixar um aspecto de zero gravidade?
+
+===== USUÁRIO [2026-11-01 18:56:57] =====
+Eu quero que a bola seja mais rapida
+
+----- CLAUDE [2026-11-01 18:57:27] -----
+A bola agora anda **60% mais rápido**: subi o piso de velocidade (`PLAYER_MIN_SPEED`) de 5 para **8** em [main.cpp:250](src/main.cpp#L250). O projeto compila, mas não abri o jogo para ver como ficou. Os números abaixo são da simulação de 5 minutos em linha reta, com dive nas descidas:
+
+| Piso | Distância em 5 min | Voos |
+|---|---|---|
+| 5 (antes) | 2222 | 88 |
+| **8 (agora)** | **2875** | **154** |
+| 10 | 3358 | 218 |
+
+Escolhi 8 em vez de 10 porque, com 10, a bola decola em quase todo morro e o chão quase não aparece. Se quiser mais rápido, é só mudar esse valor.
+
+Isso também responde a sua pergunta anterior: **aumentar a velocidade horizontal é a forma de ter voos mais longos sem cara de gravidade zero.** O alcance de um salto é a velocidade horizontal vezes o tempo no ar, e mais velocidade faz a bola decolar com mais frequência e ir mais longe. A gravidade continua a mesma, então a queda ainda parece pesada. Já diminuir a gravidade aumenta o tempo de voo, mas é exatamente o que dá a sensação de "flutuar".
+
+Se quiser ainda mais tempo de voo mantendo o peso da queda, as outras opções são:
+- **Menos arrasto** (`PLAYER_DRAG` 0.15 → 0.08): o embalo das descidas dura mais, e a bola chega mais rápido nas rampas.
+- **Planar com sustentação:** em vez de baixar a gravidade, dar um empurrão para cima proporcional à velocidade horizontal, como uma asa. Rápido, plana bem; devagar, cai pesado.
+
+===== USUÁRIO [2026-11-01 19:04:41] =====
+<ide_opened_file>The user opened the file /home/rafastephanou/Projects/ProjetoCG/TrabalhoCG/src/main.cpp in the IDE. This may or may not be related to the current task.</ide_opened_file>
+qual a diferenca de g_playerspeed e lpayer_min_speed
+
+----- CLAUDE [2026-11-01 19:04:50] -----
+Uma é uma variável que muda o tempo todo, a outra é uma constante fixa:
+
+| | `g_PlayerSpeed` | `PLAYER_MIN_SPEED` |
+|---|---|---|
+| **O que é** | Variável global ([main.cpp:241](src/main.cpp#L241)) | Constante, um `#define` ([main.cpp:250](src/main.cpp#L250)) |
+| **Valor** | Muda a cada quadro | Sempre 8 |
+| **Significado** | Velocidade **atual** da bola | Velocidade **mínima** permitida, o piso |
+
+**`g_PlayerSpeed`** é a velocidade que a bola tem agora, e é o número que aparece no HUD como `Speed`. A gravidade aumenta esse valor nas descidas e diminui nas subidas, o dive amplifica esse efeito e o arrasto puxa de volta para baixo.
+
+**`PLAYER_MIN_SPEED`** é o limite que `g_PlayerSpeed` nunca pode ultrapassar para baixo. Depois de toda atualização, o código faz:
+
+```cpp
+g_PlayerSpeed = std::max(g_PlayerSpeed, PLAYER_MIN_SPEED);
+```
+
+Ou seja, se a gravidade numa subida tentar deixar a bola a 6, ela fica em 8.
+
+A constante também aparece em outros lugares:
+- **Arrasto:** só age sobre a parte acima de 8, `(g_PlayerSpeed − PLAYER_MIN_SPEED)`.
+- **Decolagem:** exige `g_PlayerSpeed ≥ 8 + 0,5`.
+- **Reinício:** `ResetGame()` coloca `g_PlayerSpeed = PLAYER_MIN_SPEED`.
+
+O `8.0f` na declaração de `g_PlayerSpeed` é só o valor inicial, e o `ResetGame()` já sobrescreve ele quando o jogo começa. Eu escrevi 8 ali para não usar `PLAYER_MIN_SPEED`, porque a variável é declarada antes do `#define` no arquivo. Se você mudar o piso, não precisa mexer nesse 8.
+
+===== USUÁRIO [2026-11-01 19:07:00] =====
+<ide_opened_file>The user opened the file /home/rafastephanou/Projects/ProjetoCG/TrabalhoCG/src/main.cpp in the IDE. This may or may not be related to the current task.</ide_opened_file>
+quero o terreno mais com montanhas aleatorias em vez de ondas constantes de montanhas
+
+----- CLAUDE [2026-11-01 19:08:30] -----
+Agora o relevo é aleatório: as alturas são sorteadas em duas escalas diferentes, e não seguem mais o padrão de ondas regulares. Compila, e no print o terreno aparece irregular, sem repetição.
+
+## Como ficou ([terrain.cpp](src/terrain.cpp))
+
+O terreno passou a ser a **soma de duas superfícies de Bézier bicúbicas**:
+
+| Camada | Tamanho do retalho | Alturas dos vértices |
+|---|---|---|
+| **Montanhas** | 32 × 32 | `10 · r^2.5`, com `r` sorteado em [0,1] |
+| **Morros** | 8 × 8 | sorteadas em [−1,5; +1,5] |
+
+- **Por que o padrão sumiu:** antes, linhas de x pares eram sempre topos e ímpares sempre vales. Agora cada vértice tem altura sorteada e não existe mais regra de paridade. Como as duas grades têm tamanhos diferentes e sorteios independentes, o relevo não se repete.
+- **Montanhas raras:** elevar `r` a 2,5 concentra os valores perto de 0. A maior parte da grade fica baixa, e só alguns vértices viram montanhas altas, em lugares aleatórios.
+- **Continuidade:** a soma de duas superfícies C1 continua C1, e o gradiente é a soma dos gradientes. A física não precisou mudar.
+- **Organização:** a avaliação de uma camada virou `AccumulateBezierSurface`, que é chamada uma vez para cada escala.
+
+## Verificação
+
+- **Em 19 terrenos diferentes:** a altura vai de −1,5 a 11,3, e a inclinação máxima é 0,87, dentro do que a função de distância supõe.
+- **Simulação de 5 minutos:** a bola nunca entra no chão, a queda pela borda e o reinício continuam funcionando, e a bola decola com frequência.
+
+## Ajustes ([terrain.cpp:22-28](src/terrain.cpp#L22-L28))
+
+- `TERRAIN_MOUNTAIN_MAX`: altura das montanhas mais altas.
+- `TERRAIN_MOUNTAIN_EXPONENT`: quanto maior, mais raras as montanhas altas. Com 1, são todas "médias".
+- `TERRAIN_MOUNTAIN_PATCH_SIZE`: distância entre montanhas.
+- `TERRAIN_HILL_AMPLITUDE`: o quanto os morros pequenos ondulam por cima das montanhas.
+
+Vi que você voltou o piso de velocidade para 5 e baixou o arrasto para 0.01 no `main.cpp`. Não mexi nesses valores.
+
+===== USUÁRIO [2026-11-01 19:10:29] =====
+Nao quero que seja uma descida de morro. Baseie o terreno em uma linha de altura constante com variacoes. Mas a bola precisa subir mais de altura, como fairamos isso?
+
+----- CLAUDE [2026-11-01 19:11:02] -----
+Antes, um ponto sobre o terreno atual. Nas superfícies de Bézier que estamos usando, todo topo de morro tem inclinação zero, porque `P1.y = P0.y` e `P2.y = P3.y`. Então a bola sempre decola praticamente na horizontal, e a altura máxima do voo fica limitada à altura do próprio topo. Para ela subir alto, o terreno precisa lançá-la para cima.
+
+## 1. Linha base constante
+
+O terreno passaria a oscilar em torno de y = 0, com vales abaixo e cristas acima, sem tendência de subir ou descer. Para não ficar regular, cada nó da curva teria:
+- **altura sorteada:** vales de −2 a −0,5 e cristas de 1 a 4;
+- **posição em x com deslocamento sorteado:** `x_i = i·L + jitter(i)`, o que deixa os espaçamentos desiguais e ainda permite achar o segmento com uma fórmula fechada.
+
+A variação em z continuaria, mas mais suave.
+
+## 2. Rampas assimétricas para ganhar altura
+
+Esta é a parte principal. Cada trecho vale → crista passaria a ser uma **rampa**: no lugar de `P2.y = P3.y`, `P2` fica abaixo da crista. Assim a curva chega no topo ainda subindo, como a borda de um trampolim, e depois cai do outro lado.
+
+```
+        lábio
+         /\
+        /  \____
+  _____/        \___   ← antes: topo achatado, decola na horizontal
+```
+
+A altura que a bola ganha acima do lábio é:
+
+**h = (v · sen θ)² / (2g)**
+
+onde v é a velocidade no lábio e θ é o ângulo de saída. Planando (g ≈ 6,4):
+
+| v no lábio | θ = 0° (hoje) | θ = 25° | θ = 35° |
+|---|---|---|---|
+| 10 | ~0 | 1,4 | 2,6 |
+| 15 | ~0 | 3,2 | 5,8 |
+| 20 | ~0 | 5,6 | 10,3 |
+
+O lábio fica com uma quina, ou seja, contínuo mas sem tangente contínua (C0). É intencional, porque é o que faz uma rampa funcionar. A física atual já trata isso: no lábio o terreno "some" debaixo da bola, o teste de decolagem dispara, e ela sai com a velocidade apontando para cima. Os vales continuam suaves, já que uma quina côncava daria um tranco.
+
+O jogo vira um ritmo: **dive na descida, para ganhar velocidade no vale**, e depois **soltar na rampa**, para não frear com a gravidade amplificada. Isso faz a bola sair alta do lábio.
+
+## 3. Opcional: sustentação ao planar
+
+Se quiser ainda mais tempo no alto sem cara de gravidade zero, dá para aplicar uma força para cima proporcional à velocidade horizontal, como uma asa, só enquanto ela plana. Rápido, ela sustenta; devagar, cai pesado.
+
+Minha recomendação é fazer 1 + 2 agora e deixar o 3 para depois de testar. Quer que eu implemente assim?
+
+===== USUÁRIO [2026-11-01 19:12:00] =====
+Aplique as 3
+
+----- CLAUDE [2026-11-01 19:16:04] -----
+As três partes estão aplicadas. Compila sem erros, e no print a bola aparece no ar logo depois de um lábio, com a quina do lábio visível como uma linha e a próxima rampa logo à frente. O resto foi verificado por simulação, sem jogar com o mouse.
+
+## 1. Linha base constante ([terrain.cpp](src/terrain.cpp))
+
+O terreno agora oscila em torno de y = 0: a altura média é 0,2, e vai de −2,6 a 4,5. Ele é a soma de duas partes:
+- **Perfil em x:** curvas de Bézier cúbicas que alternam vale e lábio de rampa. Cada nó tem altura sorteada (vales entre −2 e −0,5, lábios entre 1 e 4) e posição em x deslocada até ±30%, então os espaçamentos são desiguais e não formam ondas regulares.
+- **Variação em z:** uma superfície bicúbica pequena (±0,6), para o terreno não ser igual de lado a lado.
+
+## 2. Rampas
+
+- **Subida:** `P1 = P0` mantém o vale suave. `P2` fica abaixo do lábio, de forma que a curva chega no topo ainda subindo, com ângulo de saída sorteado entre 15° e 35° (`P3 − P2 = tan θ · L/3`).
+- **Depois do lábio:** a curva já sai descendo a 15°. A quina do lábio é C0, de propósito, e os vales continuam C1.
+- **Decolagem no lábio:** acontece sempre, mesmo sem embalo. Fisicamente, uma esfera acima de ~2 u/s não consegue contornar uma quina convexa. A regra "a velocidade mínima não decola" continua valendo nos topos suaves.
+- **Pouso:** só acontece se a bola estiver se aproximando do chão (v · n < 0). Sem isso, ela "pousaria" na quina logo depois de sair.
+
+## 3. Sustentação ([main.cpp](src/main.cpp))
+
+Ao planar, a gravidade efetiva passa a ser `g_planar − min(0,022 · VH², 0,8 · g_planar)`:
+
+| Velocidade horizontal | Gravidade efetiva |
+|---|---|
+| 5 | 5,8 (cai quase pesado) |
+| 10 | 4,2 |
+| ≥ 15 | 1,3 (no limite: sempre cai um pouco) |
+
+Com dive não há sustentação, e a bola mergulha com a gravidade × 1,5.
+
+## Simulação (5 minutos, em linha reta)
+
+| Estratégia | Voos | Tempo no ar | Altura máx. acima do terreno |
+|---|---|---|---|
+| Sem dive | 68 | 35% | 3,7 |
+| Dive o tempo todo | 103 | 21% | 2,7 |
+| **Dive na descida, solta na subida** | 92 | **43%** | **8,1** |
+
+A técnica certa (ganhar velocidade na descida e soltar na rampa) é a que mais rende, que é o ritmo que a gente queria. Em todas as estratégias a bola nunca entra no chão, e não há mais saltos visuais nas quinas.
+
+## Ajustes
+
+- **Rampas** ([terrain.cpp](src/terrain.cpp)): `TERRAIN_LAUNCH_MIN/MAX` são os ângulos de saída (mais ângulo dá voos mais altos e mais curtos), e `TERRAIN_LIP_MAX` é a altura dos lábios.
+- **Sustentação** ([main.cpp](src/main.cpp)): `PLAYER_LIFT_COEFFICIENT` define o quanto a velocidade sustenta, e `PLAYER_LIFT_MAX_FRACTION` é o teto. Perto de 1, a bola começa a parecer sem gravidade.
+
+===== USUÁRIO [2026-11-01 19:18:00] =====
+Ok, agora deixe o terreno mais irregular
+
+----- CLAUDE [2026-11-01 19:20:32] -----
+Deixei o terreno mais irregular, e no caminho corrigi dois problemas de física que apareceram em velocidade alta. Compila, os testes de simulação passam e o jogo abre normalmente. Num print tirado logo no início, a bola está numa subida, então o efeito das mudanças aparece pouco nele; ainda não joguei para ver o terreno novo em movimento.
+
+## Terreno mais irregular ([terrain.cpp:27-45](src/terrain.cpp#L27-L45))
+
+| | Antes | Agora |
+|---|---|---|
+| Vales | −2 a −0,5 | **−3 a 0** |
+| Topos | 1 a 4 | **0,5 a 5** |
+| Tipos de topo | sempre lábio de rampa | **2/3 lábios, 1/3 morros arredondados** |
+| Ângulo de saída | 15° a 35° | **10° a 40°** |
+| Descida após o lábio | sempre 15° | **10° a 25°** |
+| Variação em z | ±0,6 a cada 16 | **±1,0 a cada 10** |
+
+Para que os extremos não virem paredes, a altura de um topo agora é limitada pela distância até os vales vizinhos (inclinação média de no máximo 0,6). Com isso, a inclinação máxima ficou em 1,16, menor que antes, mesmo com o terreno mais variado.
+
+## Correções de física
+
+Com o terreno novo e o seu arrasto de 0.01, a simulação mostrou a bola subindo até **y = 100** e **atravessando o chão**. Corrigi as duas coisas:
+- **Sustentação só na descida:** planando, a sustentação passa a só amortecer a queda. Antes ela também ajudava na subida, e em velocidade alta a bola ia longe demais para cima.
+- **Subpassos:** quando a bola andaria mais de 0,2 num quadro, o quadro é dividido em passos menores, para ela não atravessar o terreno.
+- **Rede de segurança:** se mesmo assim o centro ficar abaixo do chão dentro da faixa, a bola pousa imediatamente. Ao lado da faixa, depois de cair pela borda, ela continua caindo.
+
+## Simulação (5 minutos)
+
+| Estratégia | Voos | Tempo no ar | Altura máx. acima do terreno |
+|---|---|---|---|
+| Sem dive | 58 | 30% | 5,0 |
+| Dive o tempo todo | 77 | 17% | 4,1 |
+| **Dive na descida, solta na subida** | 95 | **41%** | **9,5** |
+| Virando ±30° | 19 reinícios por queda | — | — |
+
+Em todos os casos a bola não entra no chão (no máximo 0,0001) e não há saltos visuais. Para ajustar ainda mais, os parâmetros estão todos no topo de [terrain.cpp](src/terrain.cpp).
+
+===== USUÁRIO [2026-11-01 19:23:49] =====
+Esta ruim. Remova essa ideia de labios. Para nos deixar mais rapido, aumente a gravidade base e mantenha a capacidade de planar. Nao quero o terreno com rampas ciclicas, mas com rampas irregulares para aproveitar o aspecto 3d do jogo
+
+----- CLAUDE [2026-11-01 19:26:10] -----
+Tirei os lábios, refiz o terreno com morros e rampas irregulares em x e z, e aumentei a gravidade sem perder o planar. Compila, e no print o relevo aparece irregular, subindo e descendo em direções diferentes. A física eu verifiquei pela simulação; ainda não joguei.
+
+## Terreno ([terrain.cpp](src/terrain.cpp))
+
+Agora é a soma de **três superfícies de Bézier bicúbicas**, todas em torno de y = 0 (altura média 0,07, de −6 a +5,4):
+
+| Camada | Retalho | Amplitude | Grade girada |
+|---|---|---|---|
+| Variações largas | 40 | ±2 | 63° |
+| Morros e rampas | 16 | ±3 | 23° |
+| Ondulações | 7 | ±0,8 | −40° |
+
+As mudanças que tiram o aspecto cíclico:
+- **Sem alternância vale/topo:** cada vértice da grade tem altura sorteada, então as rampas aparecem em qualquer direção, com tamanhos e inclinações diferentes.
+- **Grades giradas:** cada camada tem um ângulo diferente, então os morros não ficam alinhados com o eixo x nem entre si. Isso também elimina as "linhas" retas do relevo.
+- **Derivadas nos vértices:** antes eram sempre zero (`P1 = P0`), o que achatava o terreno ao longo da grade. Agora são estimadas pelos vizinhos (`dH/du = (H(i+1) − H(i−1))/2`), e o ponto de controle vizinho fica em `H + (dH/du)/3`. Isso continua C1, ou seja, sem quinas.
+- **Faixa mais larga:** passou de 32 para **48**, para dar espaço de escolher o caminho entre os morros.
+
+## Física ([main.cpp](src/main.cpp))
+
+- **Gravidade:** subiu de 9,8 para **16**, então as descidas aceleram bem mais.
+- **Planar:** o multiplicador caiu de 0,65 para **0,4**. Como 0,4 × 16 = 6,4, a gravidade ao planar ficou igual à de antes. A sustentação continua igual.
+- **Lábios:** toda a lógica foi removida (decolagem forçada e a função `TerrainLipBetween`). Os subpassos de alta velocidade e o pouso só quando a bola se aproxima do chão continuam.
+
+## Simulação (5 minutos)
+
+| Estratégia | Distância | Voos | Tempo no ar | Altura máx. acima do terreno |
+|---|---|---|---|---|
+| Sem dive | 2429 | 45 | 7% | 1,1 |
+| Dive o tempo todo | 3673 | 6 | 0% | 0,1 |
+| **Dive na descida, solta na subida** | **4375** (antes ~2550) | 173 | **47%** | **7,4** |
+
+Com a técnica certa a bola anda **~70% mais rápido** que antes e passa quase metade do tempo voando. Dar dive o tempo todo cola a bola no chão, então o jogo recompensa o ritmo. Ela continua sem entrar no chão e sem saltos visuais.
+
+Para ajustar o relevo, mude `g_TerrainLayers` no topo de [terrain.cpp](src/terrain.cpp): aumente a amplitude da camada do meio para rampas mais altas, ou diminua o tamanho do retalho para morros mais frequentes.
+
+===== USUÁRIO [2026-11-01 19:27:08] =====
+o terreon esta regular demais. adicione algumas montanhas mais ingrimes
+
+----- CLAUDE [2026-11-01 19:28:26] -----
+Adicionei montanhas íngremes ao terreno. Compila e os testes de simulação passam. Rodei o jogo por 6 segundos sem controlar e tirei um print: a bola aparece no ar diante da encosta de uma montanha, que ocupa quase toda a tela.
+
+## Como funciona ([terrain.cpp](src/terrain.cpp))
+
+Entrou uma **quarta camada** em `g_TerrainLayers`, de montanhas esparsas:
+- **Picos sorteados:** em vez de sortear altura para todo vértice da grade, só **12%** deles viram picos, com altura entre 5,4 e 9. O resto fica em 0.
+- **Encostas íngremes:** os picos são isolados sobre uma grade pequena (retalho de 11), por isso as encostas sobem rápido.
+- **Mais uma grade girada:** essa camada tem o próprio ângulo (46°), então as montanhas também não se alinham com o resto.
+- **Relevo base:** as três camadas anteriores continuam iguais.
+
+A camada é controlada por um novo campo, `mountain_probability`: 0 deixa a camada comum, e um valor maior que 0 faz dela uma camada de picos.
+
+## Resultado
+
+| | Antes | Agora |
+|---|---|---|
+| Altura máxima | 5,4 | **13** |
+| Inclinação máxima | 0,81 | **1,68** |
+| Terreno com inclinação > 0,8 | ~0% | **12%** |
+
+Na simulação de 5 minutos, a melhor estratégia (dive na descida, soltar na subida) agora leva a bola a **18 acima do terreno**, contra 7,4 antes, porque as montanhas viram trampolins. A física continua estável: a bola entra no chão no máximo 0,0002, não há saltos visuais e a curvatura fica dentro do que a função de distância aguenta.
+
+## Ajustes
+
+Na última linha de `g_TerrainLayers`, `{ 11.0f, 9.0f, 0.8f, 0.12f }`:
+- **9.0:** altura dos picos.
+- **11.0:** largura da base. Menor deixa a montanha mais íngreme; abaixo de ~8 a curvatura começa a ficar no limite da física.
+- **0.12:** frequência das montanhas.
+
+===== USUÁRIO [2026-11-01 19:33:10] =====
+<ide_selection>The user selected the lines 256 to 256 from /home/rafastephanou/Projects/ProjetoCG/TrabalhoCG/src/main.cpp:
+GLIDE
+
+This may or may not be related to the current task.</ide_selection>
+diferenca glide gravity mult e glide max fall
+
+----- CLAUDE [2026-11-01 19:33:22] -----
+As duas controlam a queda ao planar, mas de formas diferentes. Uma é uma **aceleração**, a outra é um **limite de velocidade**:
+
+| | `PLAYER_GLIDE_GRAVITY_MULT` (0.4) | `PLAYER_GLIDE_MAX_FALL` (4.0) |
+|---|---|---|
+| **O que é** | Fração da gravidade que age ao planar | Velocidade máxima de queda ao planar |
+| **Unidade** | Multiplica a aceleração: 0,4 × 16 = 6,4 u/s² | Velocidade: 4 u/s |
+| **Controla** | **Quão rápido** a velocidade de queda aumenta | **Até onde** a velocidade de queda pode chegar |
+| **Analogia** | O peso do paraquedista | A velocidade terminal com o paraquedas aberto |
+
+## Na prática
+
+Quando a bola sai do chão, a velocidade vertical `VY` vai diminuindo, ou seja, ela passa a cair cada vez mais rápido. Isso acontece em duas fases:
+
+1. **Acelerando:** `VY` diminui 6,4 por segundo (menos a sustentação, que age só na descida). A trajetória é uma parábola.
+2. **No limite:** quando `VY` chega a −4, o código trava ali:
+   ```cpp
+   g_PlayerVY = std::max(g_PlayerVY, -PLAYER_GLIDE_MAX_FALL);
+   ```
+   A partir desse ponto a bola cai a velocidade **constante** e a trajetória vira uma linha reta inclinada. É a fase que dá a sensação de "planar". O multiplicador de gravidade deixa de importar.
+
+Quanto tempo leva até chegar no limite depende da velocidade horizontal, por causa da sustentação:
+- **devagar** (gravidade efetiva ~6,4): cerca de **0,6 s**;
+- **rápido** (sustentação máxima, gravidade efetiva ~1,3): cerca de **3 s**.
+
+## O que muda ao mexer em cada uma
+
+- **Aumentar o `GLIDE_GRAVITY_MULT`:** a bola começa a cair mais cedo e o topo da parábola fica mais baixo, mas a velocidade final de queda é a mesma.
+- **Aumentar o `GLIDE_MAX_FALL`:** a queda inicial é igual, mas a bola continua acelerando por mais tempo antes de estabilizar, então a descida final fica mais íngreme.
+
+As duas só valem **sem dive**. Com dive, a gravidade é 16 × 1,5 = 24 e não há limite de velocidade de queda.
+
+===== USUÁRIO [2026-11-01 19:38:48] =====
+<ide_opened_file>The user opened the file /home/rafastephanou/Projects/ProjetoCG/TrabalhoCG/src/main.cpp in the IDE. This may or may not be related to the current task.</ide_opened_file>
+adicione deslocamento y na tela
+
+----- CLAUDE [2026-11-01 19:39:42] -----
+Adicionei uma segunda linha no HUD, logo abaixo da velocidade, com o deslocamento vertical da bola:
+
+```
+Speed = 5.00  Heading = +0 deg
+Y = 6.21  Height = 0.00  VY = +2.95
+```
+
+| Campo | O que mostra |
+|---|---|
+| **Y** | Coordenada y do centro da bola no mundo |
+| **Height** | Altura da bola acima do terreno: 0 no chão, positiva no ar |
+| **VY** | Velocidade vertical: positiva subindo, negativa descendo |
+
+- **Height** é a distância real até o terreno menos o raio. No primeiro print aparecia 0,12 com a bola no chão de uma encosta: medindo só na vertical, o valor sai errado nas rampas, porque o centro fica deslocado ao longo da normal. Corrigi isso e recompilei, mas não tirei um print novo, então a correção ainda não foi vista na tela.
+- **VY** no chão é a componente vertical da velocidade ao longo da rampa. No ar é a própria velocidade vertical do voo.
+
+O código está em `TextRendering_ShowPlayerSpeed` em [main.cpp](src/main.cpp). A linha nova some junto com o resto quando você esconde o texto informativo.
+
+===== USUÁRIO [2026-11-01 19:47:39] =====
+os multiplcadores para nao pressionar o botao voando e no chao sao os mesmos?
+
+----- CLAUDE [2026-11-01 19:47:52] -----
+Não. Os multiplicadores são diferentes no chão e no ar, tanto com dive quanto sem:
+
+| | **Sem dive** | **Com dive** |
+|---|---|---|
+| **No chão** | **1,0** → 16 u/s² | **2,0** (`PLAYER_DIVE_GROUND_GRAVITY_MULT`) → 32 u/s² |
+| **No ar** | **0,4** (`PLAYER_GLIDE_GRAVITY_MULT`) → 6,4 u/s², menos a sustentação na descida, com queda limitada a 4 u/s | **1,5** (`PLAYER_DIVE_GRAVITY_MULT`) → 24 u/s², sem limite |
+
+Sem dive, no chão não há constante, porque a gravidade entra inteira. No código fica assim ([main.cpp](src/main.cpp), `UpdatePlayerOnGround`):
+
+```cpp
+float gravity = PLAYER_GRAVITY * (diving ? PLAYER_DIVE_GROUND_GRAVITY_MULT : 1.0f);
+```
+
+O que cada multiplicador afeta também muda:
+- **No chão,** a gravidade age **ao longo da rampa** (`−g · sen θ`) e muda a **velocidade** da bola: acelera nas descidas e freia nas subidas. No plano ela não faz nada.
+- **No ar,** a gravidade age **na vertical** e muda a **trajetória**, puxando a bola para baixo.
+
+Por isso os valores são independentes. No chão, um multiplicador alto deixa o jogo mais rápido; no ar, ele faria a bola cair mais rápido. É por essa razão que sem dive o chão usa 1,0 (embalo máximo nas descidas) e o ar usa 0,4 (o planar).
+
+===== USUÁRIO [2026-11-01 19:48:30] =====
+vamos fazer um teste: agora so existe dive e nao dive, independente de ser no chao ou nao. configure como achar adequado
+
+----- CLAUDE [2026-11-01 19:49:26] -----
+Agora existe só **dive** e **sem dive**, com o mesmo multiplicador no chão e no ar. Compila, e testei com a simulação de 5 minutos; ainda não joguei com as mudanças.
+
+## Configuração ([main.cpp](src/main.cpp))
+
+| | Multiplicador | Gravidade |
+|---|---|---|
+| **Sem dive** (`PLAYER_NO_DIVE_GRAVITY_MULT`) | 0,5 | 8 u/s² |
+| **Com dive** (`PLAYER_DIVE_GRAVITY_MULT`) | 1,5 | 24 u/s² |
+
+- **Uma função só:** `PlayerGravity(diving)` calcula a gravidade e é usada pelo chão e pelo ar.
+- **Constante removida:** a `PLAYER_DIVE_GROUND_GRAVITY_MULT`, já que o chão não tem mais multiplicador próprio. A `PLAYER_GLIDE_GRAVITY_MULT` virou `PLAYER_NO_DIVE_GRAVITY_MULT`.
+- **Exclusivos do ar:** a sustentação e o limite de queda continuam valendo só no ar, sem dive, porque são o "paraquedas" do planar. Mantive os seus valores: planar em 0,5 e o limite de queda em 99, que na prática desliga o limite.
+
+Mudou o seguinte em relação a antes:
+- **Sem dive no chão:** de 16 para **8**. As descidas dão menos embalo se você não segurar o dive.
+- **Com dive no chão:** de 32 para **24**.
+- **No ar:** igual ao que estava.
+
+## Simulação (5 minutos)
+
+| Estratégia | Antes | Agora |
+|---|---|---|
+| Sem dive | 2159, 15% no ar | 2425, 9% no ar |
+| Dive o tempo todo | 3788, 8% no ar | 3653, 5% no ar |
+| **Dive na descida, solta na subida** | 3754, 43% no ar, altura máx. 18 | 3742, **42% no ar**, altura máx. **13** |
+
+A técnica certa continua sendo a melhor e o jogo segue com a mesma velocidade. Os voos ficaram um pouco mais baixos, porque sem dive a bola ganha menos embalo nas descidas. A física continua estável: a bola entra no chão no máximo 0,0002 e não há saltos visuais.
+
+Para testar outras combinações, basta mudar esses dois valores. Por exemplo, com sem dive = 1,0, o chão volta a acelerar como antes, mas o planar fica bem mais pesado.
+
+===== USUÁRIO [2026-11-01 19:55:10] =====
+por que a minha velocidade esta aumentando durante o voo?
+
+----- CLAUDE [2026-11-01 19:55:27] -----
+Porque no ar a velocidade mostrada é a **velocidade total**, que soma a horizontal e a vertical. Quando a bola cai, a parte vertical cresce. Em `UpdatePlayerInAir` ([main.cpp](src/main.cpp)):
+
+```cpp
+g_PlayerSpeed = sqrtf(g_PlayerVH*g_PlayerVH + g_PlayerVY*g_PlayerVY);
+```
+
+- **`VH` (horizontal)** não muda no ar. A única coisa que mexe nela é o piso de 5.
+- **`VY` (vertical)** muda o tempo todo por causa da gravidade: diminui até zero na subida, depois fica cada vez mais negativa na descida.
+
+Então a velocidade mostrada **cai** enquanto a bola sobe e **aumenta** enquanto ela desce. É o comportamento físico: a altura vira velocidade, como numa montanha-russa.
+
+Exemplo, saindo a 10 na horizontal:
+
+| Momento | VH | VY | Speed |
+|---|---|---|---|
+| Topo do voo | 10 | 0 | 10 |
+| Caindo 1 s planando (~1,3 u/s² com sustentação) | 10 | −1,3 | 10,1 |
+| Caindo 1 s com dive (24 u/s²) | 10 | −24 | **26** |
+
+**Por que agora isso aparece tanto:** você colocou `PLAYER_GLIDE_MAX_FALL` em **99**, o que na prática desliga o limite de queda. Com o limite em 4, `VY` parava em −4 ao planar, e a velocidade estabilizava logo (√(10² + 4²) ≈ 10,8). Sem o limite, a queda acelera até o pouso.
+
+**Esse ganho não é só visual.** No pouso, a parte da velocidade alinhada com o terreno é mantida. Cair numa descida conserva boa parte desse `VY`, e a bola sai do pouso mais rápida do que decolou.
+
+Se não quiser esse efeito, há três opções:
+1. **Voltar o limite de queda para ~4:** a velocidade no ar quase não muda ao planar. Com dive, continua crescendo, porque o limite não vale no mergulho.
+2. **Mostrar só a velocidade horizontal (`VH`) no HUD:** o número fica estável no voo, mas a física não muda. A velocidade vertical já aparece como `VY` na segunda linha.
+3. **Deixar como está:** cair converte altura em velocidade, e pousar bem alinhado numa descida vira uma forma de acelerar.
+
+===== USUÁRIO [2026-11-01 19:55:52] =====
+mostre so a velocidade horizontal e vertical separadamente
+
+----- CLAUDE [2026-11-01 19:56:32] -----
+No HUD, a velocidade total foi substituída pelas componentes separadas:
+
+```
+VH = 4.12  VY = +2.83  Heading = -11 deg
+Y = 6.16  Height = 0.00
+```
+
+- **VH** é a velocidade horizontal, na direção do rumo. No ar ela fica constante durante o voo.
+- **VY** é a velocidade vertical: positiva subindo, negativa descendo. Ela subiu da segunda linha para a primeira, ao lado da VH.
+- **Segunda linha:** ficou só com a posição `Y` e a altura acima do terreno.
+
+No chão, as duas componentes vêm da velocidade ao longo da rampa. No print a bola está subindo uma encosta íngreme no piso de velocidade: √(4,12² + 2,83²) = 5. É por isso que **VH aparece abaixo de 5 numa subida**: o piso vale para a velocidade **ao longo do terreno**, não para a horizontal. Quanto mais íngreme a subida, mais dessa velocidade vai para o eixo vertical.
+
+A mudança está em `TextRendering_ShowPlayerSpeed` em [main.cpp](src/main.cpp).
+
+===== USUÁRIO [2026-11-01 20:24:48] =====
+A queda da bola eh exponencial?
+
+----- CLAUDE [2026-11-01 20:25:03] -----
+Não. A queda é **parabólica**: a aceleração é constante, então a velocidade cresce de forma linear e a altura cai com o quadrado do tempo.
+
+## Por que é parabólica
+
+No ar, a cada passo o código faz ([main.cpp](src/main.cpp), `UpdatePlayerInAir`):
+
+```cpp
+g_PlayerY  += g_PlayerVY * delta_t - 0.5f * g * delta_t * delta_t;
+g_PlayerVY -= g * delta_t;
+```
+
+Com `g` constante, isso é o movimento uniformemente variado:
+
+- **velocidade:** `VY(t) = VY₀ − g·t`, linear;
+- **altura:** `Y(t) = Y₀ + VY₀·t − ½·g·t²`, quadrática.
+
+E `g` é constante durante a queda porque:
+- **com dive,** vale sempre 24;
+- **planando,** vale `8 − sustentação`, e a sustentação depende só de `VH`, que não muda no ar. Ela muda uma vez, no topo do voo, quando `VY` passa a ser negativa e a sustentação entra. Na prática são duas parábolas emendadas: uma subindo, outra descendo mais devagar.
+
+## Quando ela deixa de ser parábola
+
+Com o **limite de queda** (`PLAYER_GLIDE_MAX_FALL`), quando `VY` chega no limite a velocidade trava e a altura passa a cair **linearmente**. Você deixou o limite em 99, então isso quase nunca acontece.
+
+## Onde existe algo exponencial
+
+Seria exponencial se houvesse uma resistência proporcional à velocidade. Aí a velocidade de queda se aproximaria de um limite, a velocidade terminal, sem nunca chegar a ele exatamente. No ar não fizemos isso.
+
+O único comportamento exponencial do jogo está **no chão**: o arrasto `−PLAYER_DRAG · (v − v_min)` faz o excesso de velocidade cair exponencialmente em direção ao piso. Com o seu arrasto de 0.01, a meia-vida é de cerca de 70 s, então quase não se percebe.
+
+===== USUÁRIO [2026-11-01 20:25:24] =====
+Retire o limite de queda no codigo
+
+----- CLAUDE [2026-11-01 20:25:38] -----
+Removi o limite de queda do código. Ele compila sem erros, mas não abri o jogo nem rodei a simulação depois dessa mudança.
+
+- **Constante removida:** a linha `#define PLAYER_GLIDE_MAX_FALL` sumiu.
+- **Trava removida:** saiu de `UpdatePlayerInAir` o trecho que segurava `VY` no limite enquanto a bola planava (`g_PlayerVY = std::max(g_PlayerVY, -PLAYER_GLIDE_MAX_FALL)`).
+
+Com o valor em 99 que você tinha deixado, o comportamento praticamente não muda: o limite já não fazia efeito. Agora a queda é sempre uma parábola até o pouso. O que diferencia planar de mergulhar continua sendo:
+- a gravidade: 0,45 × 16 = 7,2 sem dive, 24 com dive;
+- a sustentação, que age só sem dive e só enquanto a bola desce.

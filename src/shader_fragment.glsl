@@ -157,7 +157,7 @@ void main()
     // A cor do céu é a mesma de glClearColor() em "main.cpp", convertida para
     // o espaço linear, pois a correção gamma abaixo será aplicada a ela.
     vec3 sky_color = pow(vec3(0.9, 0.9, 1.0), vec3(2.2));
-    float fog = smoothstep(40.0, 90.0, length(camera_position - p));
+    float fog = smoothstep(35.0, 80.0, length(camera_position - p));
     color.rgb = mix(color.rgb, sky_color, fog);
 
     // NOTE: Se você quiser fazer o rendering de objetos transparentes, é
