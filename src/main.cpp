@@ -250,7 +250,6 @@ bool  g_PlayerOnGround = true;
 
 #define PLAYER_MIN_SPEED   5.0f  // Limite inferior da velocidade: o jogador nunca fica mais lento que isso, nem para, nem anda para trás
 #define PLAYER_GRAVITY     16.0f // Aceleração da gravidade. Maior que a real (9.8), para que as descidas acelerem mais o jogador.
-#define PLAYER_DRAG        0.01f // Taxa com que o excesso de velocidade, acima do limite inferior, se dissipa, por segundo
 
 // Multiplicadores da gravidade, os mesmos no chão e no ar (veja PlayerGravity())
 #define PLAYER_NO_DIVE_GRAVITY_MULT 0.45f  // Sem "dive": no chão, acelera pouco nas descidas; no ar, plana
@@ -705,12 +704,7 @@ void UpdatePlayerOnGround(float delta_t, bool diving)
     float gravity = PlayerGravity(diving);
     float gravity_acceleration = -gravity * slope / len;
 
-    // O excesso de velocidade acima do limite inferior se dissipa aos
-    // poucos. Sem isso, o limite inferior abaixo injetaria energia a cada
-    // subida e a velocidade poderia crescer indefinidamente.
-    float drag_acceleration = -PLAYER_DRAG * (g_PlayerSpeed - PLAYER_MIN_SPEED);
-
-    g_PlayerSpeed += (gravity_acceleration + drag_acceleration) * delta_t;
+    g_PlayerSpeed += gravity_acceleration * delta_t;
 
     // Nas subidas o jogador desacelera, mas nunca abaixo do limite inferior.
     g_PlayerSpeed = std::max(g_PlayerSpeed, PLAYER_MIN_SPEED);
@@ -731,9 +725,10 @@ void UpdatePlayerOnGround(float delta_t, bool diving)
     // consistentes.
     //
     // Além disso, só é possível decolar com embalo: na velocidade mínima o
-    // jogador nunca sai do chão. Exigimos uma folga acima do limite inferior
-    // porque, pelo arrasto, a velocidade se aproxima dele exponencialmente e
-    // fica indefinidamente um pouco acima.
+    // jogador nunca sai do chão. Exigimos uma folga acima do limite inferior,
+    // e não apenas velocidade maior que ele, para que uma pequena sobra de
+    // velocidade (por exemplo, ao fim de uma subida que quase levou o jogador
+    // ao limite) não baste para decolar.
     bool has_momentum = g_PlayerSpeed >= PLAYER_MIN_SPEED + PLAYER_TAKEOFF_MIN_EXCESS;
 
     float next_x = g_PlayerX + vh*dir_x*delta_t;
