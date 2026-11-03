@@ -30,17 +30,15 @@ Solucao:
 O jogador tem dois estados: Com dive ou sem dive.
 Dar dive aumenta o multiplicador gravitacional, enquanto não ter dive diminui.
 
-Calculamos a inclinação do terreno pra onde o jogador aponta, em que slope > é subida e slope < 0 descida. Como a inclinação é relativa a onde estamos apontando, andar de lado em uma ladeira pode ser plano.
-
-A aceleração causada pela gravidade é definida por 
--gravity * slope / sin(slope), o que gera ganho na descida e perda na subida. No divde, os efeitos de subida e descida ficam mais intensos devido ao multiplicador.
+Calculamos a inclinação do terreno pra onde o jogador aponta, com a fórmula -gravity * slope / sin(slope), o que gera ganho na descida e perda na subida. Como a inclinação é relativa a onde estamos apontando, andar de lado em uma ladeira pode ser plano.
+Quando o jogador dá o dive, os efeitos de subida e descida ficam mais intensos devido ao multiplicador gravitacional.
 
 Existe um piso de velocidade para garantir que o jogador nunca fique parado.
 
-No ar, a gravidade não afeta a velocidade horizontal, só a vertical.
-Para dar a impressão de voo, existe a variável lift (planagem do pássaro), qeu reduz a força gravitacional conforme a velocidade de voo. Dar dive no ar anula a sustentação.
+Voo: velocidade é decomposta em velocidade horizontal, que é constante, e velocidade vertical, que decai pela gravidade.
 
-Decolagem: No chão, a cada frame, o código testa: "se a bola estivesse solta, sujeita só à gravidade, ela ainda estaria tocando no terreno?" Se sim, o pássaro entra em estado de voo. 
-A velocidade é então decomposta em velocidade horizontal, que é constante, e velocidade vertical, que decai.
+Para dar a impressão de voo, existe a variável lift (planagem do pássaro), que reduz a força gravitacional conforme a velocidade de voo. Dar dive no ar anula a sustentação e aplica o multiplicador gravitacional.
 
-Aterrisagem: A velocidade é dividida entre a parte paralela à inclinação do terreno, que é mantida, e a parte perpendicular a ele, que é descartada. Isso resulta em uma redução de velocidade proporcional ao valor da derivada do terreno aterrisado.
+Decolagem: No chão, a cada frame, o código testa: "se o pássaro estivesse solto, sujeito só à gravidade, ele ainda estaria tocando no terreno?" Se não, o pássaro entra em estado de voo. 
+
+Aterrizagem: A velocidade é dividida entre a parte paralela à inclinação do terreno, que é mantida, e a parte perpendicular a ele, que é descartada. Isso resulta em uma redução de velocidade proporcional à inclinação do terreno em que o pássaro aterrizou.
